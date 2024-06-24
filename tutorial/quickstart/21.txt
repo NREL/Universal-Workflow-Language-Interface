@@ -1,0 +1,1 @@
+In some situations, you will want to use the same item across different sections. This can be achieved by linking item blocks. To start a linked block, double click an item in the section work space. Click the "Linked Item" check box and add a unique string to the "Link ID Field". Additionally, add a new parameter to the item for this demonstration and click confirm.

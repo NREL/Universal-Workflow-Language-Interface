@@ -1,0 +1,1 @@
+After saving the workflow, create a new empty workflow by selecting "New" under the file menu, or pressing Ctrl + N. A blank workflow tab should appear at the top of the interface.

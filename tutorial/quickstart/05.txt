@@ -1,0 +1,1 @@
+Next, right click in an empty area of the work space, and select "Create Item Block". This time in the pop up prompt, enter a container name by clicking in the empty box and selecting one of the names in the drop down. Names not listed in the menu can also be manually entered. Click confirm to create the item block.

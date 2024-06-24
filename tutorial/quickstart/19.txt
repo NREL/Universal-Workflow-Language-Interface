@@ -1,0 +1,1 @@
+Blocks from other workflows can also be imported directly from the their UWL file as either loose blocks or as a new section block. Right click in the work space and import the first protocol you saved as a new section.

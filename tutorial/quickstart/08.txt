@@ -1,0 +1,1 @@
+Select the new item block and the action block, then add a B-Type connection from the context menu. A blue line should appear connecting the two blocks. This work flow forms a basic step in a protocol.

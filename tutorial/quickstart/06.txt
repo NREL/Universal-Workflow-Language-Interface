@@ -1,0 +1,1 @@
+Click and drag the selection box over the two blocks or click "Select All" under the Edit menu. Right click on one of the selected blocks then select "Add A-Type Connections". A white line should appear connecting the action and item block.

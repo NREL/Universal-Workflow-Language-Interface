@@ -1,0 +1,1 @@
+Start by right clicking in the workspace area, outlined in red, and selecting "Create Action Block" in the context menu.

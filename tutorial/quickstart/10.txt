@@ -1,0 +1,1 @@
+Add a third item to the workflow, then connect it to the action block using a C-Type connection. Hover your mouse over the action block to preview the procedure step that was made. Any connection type can be changed by double clicking the desired line and selecting a new connection type from the dropdown menu.

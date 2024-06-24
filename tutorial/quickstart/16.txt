@@ -1,0 +1,1 @@
+Return to the blank workflow, and right click and select paste. The selected blocks should appear in the work flow. Right click in the blank area to the right of the pasted blocks and select paste again.

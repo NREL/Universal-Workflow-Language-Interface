@@ -1,0 +1,1 @@
+Any placed block can be modified by double clicking on the desired block to open the meta data menu. Modify the "Add" block, and select a new Sub-type and Name, and fill in a parameter and associated value. Additional parameters and notes can be added if desired.

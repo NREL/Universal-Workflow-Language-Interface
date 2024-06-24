@@ -1,0 +1,1 @@
+Double click the section block to open its nested workspace. Sections are a block type that contain additional workspaces. They are used primarily for organizational purposes and are often meant to designate major segments of a protocol. Sections can also be nested within other sections. Section names, details, and nested workflows can be modified from this window.

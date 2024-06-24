@@ -1,0 +1,1 @@
+At this point the workflow may extend beyond your displayed workspace. Adjust the view of your workflow by using the zoom in/out and pan features. Zoom by holding Ctrl and scrolling with your mouse wheel or touchpad, and pan using the arrow keys. Holding Shift while panning or zooming will increase the speed. Additional controls are shown under the Help menu.

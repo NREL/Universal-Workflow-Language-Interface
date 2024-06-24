@@ -1,0 +1,1 @@
+Save the current workflow by going under the file menu and selecting "Save" then follow the file save prompt to create a .json file in a desired location.

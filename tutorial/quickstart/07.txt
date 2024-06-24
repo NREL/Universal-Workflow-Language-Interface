@@ -1,0 +1,1 @@
+Place a second item block in the work space, but this time click the Sub-type dropdown menu and select "Source". Then select a source material from the Name dropdown list and click "Confirm".

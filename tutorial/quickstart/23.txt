@@ -1,0 +1,1 @@
+Workflow parameters can be viewed in a tabular format by clicking the "Table" tab on the left of the interface. All parameters for all open workflows will appear as a table on this tab. Changes made to the values in the table will propagate to the workflows.
