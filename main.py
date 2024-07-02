@@ -1,10 +1,6 @@
 """
 Universal Workflow Language Interface.
 
-Created on Wed Mar  8 10:49:22 2023
-
-adapted from eyllanesc
-
 @author: repps
 
 """

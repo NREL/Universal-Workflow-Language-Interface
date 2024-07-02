@@ -3,13 +3,18 @@
 
 UWLi (Universal Workflow Language interface) is a user interface for building and modifying UWL files. UWL is a data format used to represent high fidelity scientific procedures in a generalized, field agnostic workflow format.
 
+Learn more about the project at: [citation]
+
 To get involved in development or implementation or to learn more contact Robert Epps at repps@nrel.gov.
 
 ![Logo](/Logo/Summary_readme_v1.png?raw=true)
 
 # Installation
+## Windows
+Clone this repository to your local machine. Navigate to "UWL.exe" and double click the file. A second window should appear followed by the interface.
 
-The following instructions will allow you to run UWLi without downloading additional software like a Python IDE.
+## Python
+The following instructions will allow you to run UWLi using python.
 1. Clone this repository to your local machine, then navigate to the directory location using the command prompt. Replace "< file path >" with the directory file path location of your clone of this repository. Note the command prompt can be accessed through the Windows start menu or through Anaconda if available.
 ```shell
 cd < file path >
@@ -25,4 +30,4 @@ pip install -r requirements.txt
 python main.py
 ```
 
-UWLi should launch as a separate window and be available to use.
+UWLi should launch as a separate window and be available to use. If you have any problems contact repps@nrel.gov.
