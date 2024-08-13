@@ -27,8 +27,6 @@ class language():
     def __init__(self):
         self.ui = WindowClass()
         self.processedfilepath = 'preprocessing//multilingual_dict.pkl'
-        # langkeys = ['zh-cn', 'es', 'en', 'hi', 'pt', 'bn', 'ru', 'ja', 'vi', 'tr', 'mr', 'te', 'ko', 'fr', 'ta', 'ar', 'de', 'ur', 'jw', 'pa', 'it', 'gu', 'fa']
-        # langkeys = ['zh-Hans', 'en', 'es']
         langkeys = ['en', 'zh-Hans', 'tlh-Latn', 'ar', 'bn', 'cs', 'da', 'de', 'el', 'es',
                     'fi', 'fil', 'fr', 'he', 'hi', 'hr', 'id', 'it', 'ja', 'ko',
                     'nb', 'ne', 'pa', 'pl', 'ps', 'pt', 'ro', 'ru', 'th', 'uk',

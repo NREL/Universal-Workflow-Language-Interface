@@ -4694,7 +4694,10 @@ class autocompleteLineEdit(QLineEdit):
 
 if __name__ == "__main__":
     myappid = 'NREL.UWLI.0.0'  # arbitrary string
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    if os.name == 'posix':
+        pass
+    else:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
