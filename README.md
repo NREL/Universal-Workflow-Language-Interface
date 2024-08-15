@@ -1,4 +1,4 @@
-# Perovskite-Data-Lab
+# Universal Workflow Language Interface
 ![Logo](/Logo/Logo_readme_v1.png?raw=true)
 
 UWLi (Universal Workflow Language interface) is a user interface for building and modifying UWL files. UWL is a data format used to represent high fidelity scientific procedures in a generalized, field agnostic workflow format.
