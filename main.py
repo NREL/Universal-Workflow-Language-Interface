@@ -2247,29 +2247,28 @@ class TabPlaintextController(QTabWidget):
 
         errorMsg = '**' + self.textconstlist[13] + '**'
         def errorFunc(a, b, c): return errorMsg
-
-        if actionParent == 'Add':
-            if numBIns == 0 or numAIns == 0:
-                tempfunc = errorFunc
-            elif numBIns > 0 and numCIns == 0:
-                tempfunc = self.actionDict[
-                    actionName][self.lankey]['Func']['00']
-            elif numBIns > 0 and numCIns > 0:
-                tempfunc = self.actionDict[
-                    actionName][self.lankey]['Func']['01']
-
-        if actionParent == 'Remove':
-            if numBIns == 0 or numAIns == 0:
-                tempfunc = errorFunc
-            elif numBIns > 0 and numCIns == 0:
-                tempfunc = self.actionDict[
-                    actionName][self.lankey]['Func']['00']
-            elif numBIns > 0 and numCIns > 0:
-                tempfunc = self.actionDict[
-                    actionName][self.lankey]['Func']['01']
-
-        if actionParent == 'Modify':
-            try:
+        try:
+            if actionParent == 'Add':
+                if numBIns == 0 or numAIns == 0:
+                    tempfunc = errorFunc
+                elif numBIns > 0 and numCIns == 0:
+                    tempfunc = self.actionDict[
+                        actionName][self.lankey]['Func']['00']
+                elif numBIns > 0 and numCIns > 0:
+                    tempfunc = self.actionDict[
+                        actionName][self.lankey]['Func']['01']
+    
+            if actionParent == 'Remove':
+                if numBIns == 0 or numAIns == 0:
+                    tempfunc = errorFunc
+                elif numBIns > 0 and numCIns == 0:
+                    tempfunc = self.actionDict[
+                        actionName][self.lankey]['Func']['00']
+                elif numBIns > 0 and numCIns > 0:
+                    tempfunc = self.actionDict[
+                        actionName][self.lankey]['Func']['01']
+    
+            if actionParent == 'Modify':
                 if numBIns == 0 and numCIns == 0:
                     tempfunc = self.actionDict[
                         actionName][self.lankey]['Func']['00']
@@ -2285,9 +2284,9 @@ class TabPlaintextController(QTabWidget):
                 else:  # Special case function handling
                     tempfunc = self.actionDict[
                         actionName][self.lankey]['Func']['S']
-            except Exception as e:
-                print(e)
-                tempfunc = errorFunc
+        except Exception as e:
+            print(e)
+            tempfunc = errorFunc
 
         textline = tempfunc(itemA, itemB, itemC)
         return textline
