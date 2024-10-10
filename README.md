@@ -3,6 +3,8 @@
 
 UWLi (Universal Workflow Language interface) is a user interface for building and modifying UWL files. UWL is a data format used to represent high fidelity scientific procedures in a generalized, field agnostic workflow format.
 
+Learn more about the project at: https://arxiv.org/abs/2409.05899
+
 To get involved in development or implementation or to learn more contact Robert Epps at repps@nrel.gov.
 
 ![Logo](/Logo/Summary_readme_v1.png?raw=true)
