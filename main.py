@@ -11,11 +11,10 @@ from PyQt5.QtWidgets import (QMainWindow,
                              QAction,
                              QFileDialog,
                              QMessageBox,
-                             QTreeWidget,
                              QToolBar,
                              QLabel,
-                             QTreeWidgetItem,
                              QWidget,
+                             QLayout,
                              QVBoxLayout,
                              QHBoxLayout,
                              QGridLayout,
@@ -37,7 +36,10 @@ from PyQt5.QtWidgets import (QMainWindow,
                              QCompleter,
                              QCheckBox,
                              QComboBox,
-                             QScrollArea
+                             QScrollArea,
+                             QToolButton,
+                             QInputDialog,
+                             QShortcut,
                              )
 from PyQt5.QtCore import (Qt,
                           QEventLoop,
@@ -54,18 +56,34 @@ from PyQt5.QtGui import (QPen,
                          QColor,
                          QPixmap,
                          QIcon,
-                         QCursor
+                         QCursor,
+                         QDoubleValidator,
+                         QIntValidator,
+                         QKeySequence
                          )
 import qdarktheme
 import os
 import copy
+import random
+import math
 import pandas as pd
+from scipy.stats import qmc
+from scipy.spatial import distance_matrix
+from scipy.optimize import minimize
 import json
 import dill as pickle
 import sip
+import itertools
 import ctypes
+import numpy as np
 import plaintextdictionary
+from datetime import datetime
+from openpyxl import load_workbook
+import ast
+import re
 
+
+UWL_VERSION = '1.1.0'
 
 def savejson(entry, filepath):
     """
@@ -117,6 +135,59 @@ def loadpickle(filepath):
         return data
 
 
+def get_translation(babelFish, lankey, category, english_key, fallback=None):
+    """
+    Get translation by English key instead of index.
+    
+    Parameters
+    ----------
+    babelFish : dict
+        The translation dictionary
+    lankey : str
+        Language key (e.g., 'en', 'es', 'zh-Hans')
+    category : str
+        Translation category (e.g., 'section', 'new block', 'scene context', 'plain text const', 'widgets')
+    english_key : str
+        The English text key to look up
+    fallback : str, optional
+        Fallback text if translation not found
+        
+    Returns
+    -------
+    str
+        Translated text or fallback
+    """
+    try:
+        # Try to get translation from the new dictionary structure
+        if category in babelFish['ui'][lankey] and english_key in babelFish['ui'][lankey][category]:
+            return babelFish['ui'][lankey][category][english_key]
+        
+        # Try the actual structure: babelFish[lankey]['text list ui']
+        if lankey in babelFish and 'text list ui' in babelFish[lankey]:
+            ui_list = babelFish[lankey]['text list ui']
+            # Get the English list to find the index
+            if 'en' in babelFish and 'text list ui' in babelFish['en']:
+                en_list = babelFish['en']['text list ui']
+                try:
+                    # Find the index of the english_key in the English list
+                    index = en_list.index(english_key)
+                    # Return the translation at the same index
+                    if index < len(ui_list):
+                        return ui_list[index]
+                except ValueError:
+                    pass
+        
+        # Fallback to English if translation not found
+        if fallback is not None:
+            return fallback
+        return english_key
+    except (KeyError, TypeError):
+        # If the new structure doesn't exist, fallback to English
+        if fallback is not None:
+            return fallback
+        return english_key
+
+
 filepath = 'preprocessing//multilingual_dict.pkl'
 babelFish = loadpickle(filepath)
 
@@ -128,7 +199,7 @@ class WindowClass(QMainWindow):
         QMainWindow.__init__(self, parent)
         self.dict = plaintextdictionary.loadDictionary()
         self.setWindowTitle(
-            'Universal Workflow Language Interface - ver. 0.0.0')
+            f'Universal Workflow Language Interface - ver. {UWL_VERSION}')
         self.baseFeatures = []
         self.clipboard = {'ID': 'root',
                           'Links': [],
@@ -136,6 +207,8 @@ class WindowClass(QMainWindow):
                           'Objects': {},
                           'language': 'en'}
         self.lankey = 'en'
+        self.tableCellViewMode = "show_all"
+
         self.tabCtrl = TabViewController(
             parent=self, rootwindow=self, lankey=self.lankey)
         self.setCentralWidget(self.tabCtrl)
@@ -143,6 +216,9 @@ class WindowClass(QMainWindow):
         self._createMenuBar()
         self._createToolBars()
         self.filename = -1
+        
+        # Initialize save actions state
+        self.updateSaveActionsState()
 
     def dragEnterEvent(self, event):
         """
@@ -175,7 +251,7 @@ class WindowClass(QMainWindow):
         files = [u.toLocalFile() for u in event.mimeData().urls()]
         filenames = []
         for f in files:
-            if os.path.splitext(f)[-1] == '.json':
+            if os.path.splitext(f)[-1] in ['.json', '.uwl', 'uwlt']:
                 filenames.append(f)
         if filenames != []:
             self.onOpen(filenames)
@@ -187,21 +263,70 @@ class WindowClass(QMainWindow):
         self.buildFileMenu()
         self.buildEditMenu()
         self.buildInsertMenu()
+        self.buildViewMenu()
+        self.buildDesignMenu()
         self.buildLanguageMenu()
         self.buildHelpMenu()
 
         self.menubar.addMenu(self.filemenu)
         self.menubar.addMenu(self.editmenu)
         self.menubar.addMenu(self.insertmenu)
+        self.menubar.addMenu(self.viewmenu)
+        self.menubar.addMenu(self.designmenu)
         self.menubar.addMenu(self.langmenu)
         self.menubar.addMenu(self.helpmenu)
         self.setMenuBar(self.menubar)
 
+    def buildViewMenu(self):
+        """Build view menu and add actions."""
+        self.viewmenu = QMenu(get_translation(babelFish, self.lankey, 'widgets', 'View'), self)
+
+        self.tableViewMenu = QMenu(get_translation(babelFish, self.lankey, 'widgets', 'Table View'), self)
+        self.showAllCellsAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Show all cells'), self)
+        self.showAllCellsAction.setCheckable(True)
+        self.showAllCellsAction.setChecked(True)
+        self.showAllCellsAction.triggered.connect(self.onShowAllCells)
+
+        self.showEmptyCellsAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Show empty cells'), self)
+        self.showEmptyCellsAction.setCheckable(True)
+        self.showEmptyCellsAction.triggered.connect(self.onShowEmptyCells)
+
+        self.showUniqueCellsAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Show unique cells'), self)
+        self.showUniqueCellsAction.setCheckable(True)
+        self.showUniqueCellsAction.triggered.connect(self.onShowUniqueCells)
+
+        self.tableViewMenu.addAction(self.showAllCellsAction)
+        self.tableViewMenu.addAction(self.showEmptyCellsAction)
+        self.tableViewMenu.addAction(self.showUniqueCellsAction)
+
+        self.viewmenu.addMenu(self.tableViewMenu)
+
+    def onShowAllCells(self):
+        self.tableCellViewMode = "show_all"
+        self.showAllCellsAction.setChecked(True)
+        self.showEmptyCellsAction.setChecked(False)
+        self.showUniqueCellsAction.setChecked(False)
+        self.tabCtrl.updateEntryTable()
+
+    def onShowEmptyCells(self):
+        self.tableCellViewMode = "show_empty"
+        self.showAllCellsAction.setChecked(False)
+        self.showEmptyCellsAction.setChecked(True)
+        self.showUniqueCellsAction.setChecked(False)
+        self.tabCtrl.updateEntryTable()
+
+    def onShowUniqueCells(self):
+        self.tableCellViewMode = "show_unique"
+        self.showAllCellsAction.setChecked(False)
+        self.showEmptyCellsAction.setChecked(False)
+        self.showUniqueCellsAction.setChecked(True)
+        self.tabCtrl.updateEntryTable()
+
     def buildHelpMenu(self):
         """Build feedback, tutorial, and controls actions in help menu."""
-        self.helpmenu = QMenu('Help', self)
+        self.helpmenu = QMenu(get_translation(babelFish, self.lankey, 'widgets', 'Help'), self)
 
-        self.feedbackMenu = QMenu('Feedback', self)
+        self.feedbackMenu = QMenu(get_translation(babelFish, self.lankey, 'widgets', 'Feedback'), self)
 
         feedbacktxt = "Provide feedback, report bugs, or get involved with the"
         feedbacktxt += " project, at https://github.com/NREL/"
@@ -218,14 +343,14 @@ class WindowClass(QMainWindow):
 
     def buildControlsAction(self):
         """Build controls option widget to launch controls window."""
-        self.controlsAction = QAction('Controls', self)
+        self.controlsAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Controls'), self)
         self.controlsAction.triggered.connect(self.openControlsWindow)
 
     def openControlsWindow(self):
         """Create and launch window displaying controls information."""
         self.controlsprompt = QScrollArea()
-        self.controlsprompt.setWindowTitle('Interface Controls')
-        # TODO: Add multilingual support.
+        self.controlsprompt.setWindowTitle(get_translation(babelFish, self.lankey, 'widgets', 'Interface Controls'))
+        # TODO: Add multilingual support for the controlstxt content.
         controlstxt = """
         Workflow View Navigation
             Pan Up - < Up Arrow > or < Scroll Down .
@@ -273,23 +398,25 @@ class WindowClass(QMainWindow):
 
     def buildTutorialAction(self):
         """Create tutorial window launch action on help menu."""
-        self.tutorialAction = QAction('Tutorial', self)
+        self.tutorialAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Tutorial'), self)
         self.tutorialAction.triggered.connect(self.openTutorialWindow)
 
     def openTutorialWindow(self):
         """Open new window with TutorialWindow class."""
-        self.tutorialWindow = TutorialWindow()
+        self.tutorialWindow = TutorialWindow(lankey=self.lankey)
         self.tutorialWindow.show()
 
     def buildLanguageMenu(self):
         """Get translator method and create language menu."""
-        self.langmenu = QMenu('Language', self)
+        self.langmenu = QMenu(get_translation(babelFish, self.lankey, 'widgets', 'Language'), self)
+        # self.langmenu.setDisabled(True)
         self.getLanguages()
         self.buildLangList()
 
     def getLanguages(self):
         """Generate list of supported languages and keys."""
-        self.langmenucurrind = 7
+        # self.langmenucurrind = 7
+        self.langmenucurrind = 7  # Set English as default (index 0)
         self.trimlangKeys = [key for key in babelFish['languages'].keys()]
         self.languagelistall = [
             babelFish['languages'][key]['Menu label']
@@ -354,9 +481,7 @@ class WindowClass(QMainWindow):
 
     def applySelectedLanguageInterface(self):
         """Get all interface text and translate to selected language."""
-        self.getInterfaceWidgetsText()
-        translatedInterfaceText = babelFish['ui'][self.lankey]['widgets']
-        self.changeInterfaceWidgetsText(translatedInterfaceText)
+        self.changeInterfaceWidgetsText(babelFish, self.lankey)
         self.updateBase()
 
     def getInterfaceWidgetsText(self):
@@ -364,101 +489,144 @@ class WindowClass(QMainWindow):
         Build lists of all interface text and widgets.
 
         Method called in language preprocessing script.
+        This method is now deprecated as we use key-based translation.
 
         """
-        self.allwidgets, self.allwidgetstext = [], []
-        self.getInterfaceWidgetsMenus()
-        self.getInterfaceWidgetsTabs()
-        self.getInterfaceWidgetsTools()
+        pass
 
-    def getInterfaceWidgetsMenus(self):
-        """Append all widgets and text in menu bar to full translate list."""
-        langmenucounter = 0
-        for child in self.menubar.actions():
-            if str(type(child)) == "<class 'PyQt5.QtWidgets.QAction'>":
-                langmenucounter += 1
-                self.allwidgets.append(child)
-                self.allwidgetstext.append(child.text())
+    def changeInterfaceWidgetsText(self, babelFish, lankey):
+        """Translate all widget text using key-based translation system."""
+        # Update menu actions
+        self.updateMenuActions(babelFish, lankey)
+        
+        # Update tab texts
+        self.updateTabTexts(babelFish, lankey)
+        
+        # Update toolbar texts
+        self.updateToolbarTexts(babelFish, lankey)
+        
+        # Update label texts
+        self.updateLabelTexts(babelFish, lankey)
 
-                if langmenucounter == 4:
-                    continue
-                for subchild in child.menu().actions():
-                    if str(type(child)) == "<class 'PyQt5.QtWidgets.QAction'>":
-                        self.allwidgets.append(subchild)
-                        self.allwidgetstext.append(subchild.text())
-                        if subchild.menu() is not None:
-                            subsubchild = subchild.menu().actions()[0]
-                            self.allwidgets.append(subsubchild)
-                            self.allwidgetstext.append(subsubchild.text())
+    def updateMenuActions(self, babelFish, lankey):
+        """Update all menu action texts using key-based translation."""
+        # File menu actions
+        self.newAction.setText(get_translation(babelFish, lankey, 'widgets', 'New'))
+        self.openAction.setText(get_translation(babelFish, lankey, 'widgets', 'Open'))
+        self.saveAction.setText(get_translation(babelFish, lankey, 'widgets', 'Save'))
+        self.saveAsAction.setText(get_translation(babelFish, lankey, 'widgets', 'Save As'))
+        self.saveAllAction.setText(get_translation(babelFish, lankey, 'widgets', 'Save All'))
+        self.testAction.setText(get_translation(babelFish, lankey, 'widgets', 'Test Button'))
+        
+        # Edit menu actions
+        self.copyAction.setText(get_translation(babelFish, lankey, 'widgets', 'Copy'))
+        self.pasteAction.setText(get_translation(babelFish, lankey, 'widgets', 'Paste'))
+        self.selectAllAction.setText(get_translation(babelFish, lankey, 'widgets', 'Select All'))
+        self.delAction.setText(get_translation(babelFish, lankey, 'widgets', 'Delete'))
+        
+        # Insert menu actions
+        self.actionAction.setText(get_translation(babelFish, lankey, 'widgets', 'Create Action Block'))
+        self.itemAction.setText(get_translation(babelFish, lankey, 'widgets', 'Create Item Block'))
+        self.sectionAction.setText(get_translation(babelFish, lankey, 'widgets', 'Create Section Block'))
+        self.insertAction.setText(get_translation(babelFish, lankey, 'widgets', 'Insert from File'))
+        self.insertSectAction.setText(get_translation(babelFish, lankey, 'widgets', 'Insert from File as Section'))
+        self.addAAction.setText(get_translation(babelFish, lankey, 'widgets', 'Add A-Type Connections'))
+        self.addBAction.setText(get_translation(babelFish, lankey, 'widgets', 'Add B-Type Connections'))
+        self.addCAction.setText(get_translation(babelFish, lankey, 'widgets', 'Add C-Type Connections'))
 
-    def getInterfaceWidgetsTabs(self):
-        """Append all widgets and text in main tab view to full widget list."""
-        tabcount = self.centralWidget().count()
-        for tab_ii in range(tabcount):
-            child = self.centralWidget().widget(tab_ii)
-            self.allwidgets.append(child)
-            self.allwidgetstext.append(child.parent.tabText(tab_ii))
+        
+        # View menu actions
+        self.showAllCellsAction.setText(get_translation(babelFish, lankey, 'widgets', 'Show all cells'))
+        self.showEmptyCellsAction.setText(get_translation(babelFish, lankey, 'widgets', 'Show empty cells'))
+        self.showUniqueCellsAction.setText(get_translation(babelFish, lankey, 'widgets', 'Show unique cells'))
+        
+        # Design menu actions
+        self.expselectAction.setText(get_translation(babelFish, lankey, 'widgets', 'Design Experiment Set'))
+        self.buildtablemapAction.setText(get_translation(babelFish, lankey, 'widgets', 'Build Table Map'))
+        self.importtableAction.setText(get_translation(babelFish, lankey, 'widgets', 'Import Table'))
+        
+        # Help menu actions
+        self.tutorialAction.setText(get_translation(babelFish, lankey, 'widgets', 'Tutorial'))
+        self.controlsAction.setText(get_translation(babelFish, lankey, 'widgets', 'Controls'))
+        
+        # Menu titles
+        self.filemenu.setTitle(get_translation(babelFish, lankey, 'widgets', 'File'))
+        self.editmenu.setTitle(get_translation(babelFish, lankey, 'widgets', 'Edit'))
+        self.insertmenu.setTitle(get_translation(babelFish, lankey, 'widgets', 'Insert'))
+        self.viewmenu.setTitle(get_translation(babelFish, lankey, 'widgets', 'View'))
+        self.designmenu.setTitle(get_translation(babelFish, lankey, 'widgets', 'Batch'))
+        self.helpmenu.setTitle(get_translation(babelFish, lankey, 'widgets', 'Help'))
+        self.langmenu.setTitle(get_translation(babelFish, lankey, 'widgets', 'Language'))
+        
+        # Submenu titles
+        self.tableViewMenu.setTitle(get_translation(babelFish, lankey, 'widgets', 'Table View'))
+        self.feedbackMenu.setTitle(get_translation(babelFish, lankey, 'widgets', 'Feedback'))
 
-    def getInterfaceWidgetsTools(self):
-        """Append all widgets and text in tool bars to full widget list."""
+    def updateTabTexts(self, babelFish, lankey):
+        """Update tab texts using key-based translation."""
+        # Update the main TabViewController tabs
+        if hasattr(self, 'tabCtrl') and self.tabCtrl is not None:
+            self.tabCtrl.updateTabTexts(babelFish, lankey)
+
+    def updateToolbarTexts(self, babelFish, lankey):
+        """Update toolbar texts using key-based translation."""
+        for child in self.children():
+            if str(type(child)) == "<class 'PyQt5.QtWidgets.QToolBar'>":
+                original_title = child.windowTitle()
+                translated_title = get_translation(babelFish, lankey, 'widgets', original_title)
+                child.setWindowTitle(translated_title)
+
+    def updateLabelTexts(self, babelFish, lankey):
+        """Update label texts using key-based translation."""
         for childlayout in self.layout.children():
             for ii in range(childlayout.count()):
                 child = childlayout.itemAt(ii).widget()
                 if str(type(child)) == "<class 'PyQt5.QtWidgets.QLabel'>":
-                    self.allwidgets.append(child)
-                    self.allwidgetstext.append(child.text())
-
-        for child in self.children():
-            if str(type(child)) == "<class 'PyQt5.QtWidgets.QToolBar'>":
-                self.allwidgets.append(child)
-                self.allwidgetstext.append(child.windowTitle())
-
-    def changeInterfaceWidgetsText(self, textlist):
-        """Translate all widget text in full widget list to new language."""
-        tab_widget_strs = ["<class '__main__.TabWorkflowController'>",
-                           "<class '__main__.TabTableController'>",
-                           "<class '__main__.TabPlaintextController'>",
-                           "<class '__main__.TabRawController'>"]
-
-        type1_widget_strs = ["<class 'PyQt5.QtWidgets.QAction'>",
-                             "<class 'PyQt5.QtWidgets.QLabel'>"]
-
-        for ii, widget in enumerate(self.allwidgets):
-            widget_str = str(type(widget))
-            if widget_str in type1_widget_strs:
-                widget.setText(textlist[ii])
-            elif widget_str in tab_widget_strs:
-                widget.parent.setTabText(widget.tabind, textlist[ii])
-            elif widget_str == "<class 'PyQt5.QtWidgets.QToolBar'>":
-                widget.setWindowTitle(textlist[ii])
+                    original_text = child.text()
+                    translated_text = get_translation(babelFish, lankey, 'widgets', original_text)
+                    child.setText(translated_text)
 
     def buildFileMenu(self):
         """Add all file menu actions to menu and connect to functions."""
-        self.filemenu = QMenu('File', self)
+        self.filemenu = QMenu(get_translation(babelFish, self.lankey, 'widgets', 'File'), self)
 
-        self.newAction = QAction('New', self)
+        self.newAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'New'), self)
         self.newAction.setShortcut('Ctrl+N')
         self.newAction.triggered.connect(self.onNew)
         self.filemenu.addAction(self.newAction)
 
-        self.openAction = QAction('Open', self)
+        self.openAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Open'), self)
         self.openAction.setShortcut('Ctrl+O')
         self.openAction.triggered.connect(self.onOpen)
         self.filemenu.addAction(self.openAction)
 
-        self.saveAction = QAction('Save', self)
+        self.saveAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Save'), self)
         self.saveAction.setShortcut('Ctrl+S')
         self.saveAction.triggered.connect(self.onSave)
         self.filemenu.addAction(self.saveAction)
 
-        self.saveAsAction = QAction('Save As', self)
+        self.saveAsAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Save As'), self)
         self.saveAsAction.setShortcut('Ctrl+Shift+S')
         self.saveAsAction.triggered.connect(self.onSaveAs)
         self.filemenu.addAction(self.saveAsAction)
 
-        self.testAction = QAction('Test Button', self)
+        self.saveAllAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Save All'), self)
+        self.saveAllAction.setShortcut('Ctrl+Shift+A')
+        self.saveAllAction.triggered.connect(self.onSaveAll)
+        self.filemenu.addAction(self.saveAllAction)
+
+        self.testAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Test Button'), self)
         self.testAction.triggered.connect(self.testPrint)
         self.filemenu.addAction(self.testAction)
+
+    def updateSaveActionsState(self):
+        """Enable or disable save actions based on current tab selection."""
+        if hasattr(self, 'tabCtrl') and self.tabCtrl is not None:
+            currentTabIndex = self.tabCtrl.currentIndex()
+            # Disable save actions when table tab (index 1) is selected
+            isTableTabSelected = (currentTabIndex == 1)
+            self.saveAction.setEnabled(not isTableTabSelected)
+            self.saveAsAction.setEnabled(not isTableTabSelected)
 
     def testPrint(self):
         """Print currently selected workflow for troubleshooting."""
@@ -472,8 +640,9 @@ class WindowClass(QMainWindow):
         Operation is connected to Ctrl+Shift+S hot key.
 
         """
+        filter_string = "UWL Entry (*.uwl);;UWL Template (*.uwlt)"
         filename = QFileDialog.getSaveFileName(
-            self, 'Save File', filter='*.json')
+            self, 'Save File', filter=filter_string)
         if filename == ('', ''):  # Leave function if cancel button selected.
             return
         else:
@@ -509,6 +678,9 @@ class WindowClass(QMainWindow):
 
         self.centralWidget().widget(0).setCurrentIndex(currTabInd)
 
+    def onTableExport(self):
+        self.tabCtrl.tableTab.onTableExport()
+
     def onSave(self):
         """
         Save current workflow.
@@ -519,8 +691,10 @@ class WindowClass(QMainWindow):
         currTabInd = self.centralWidget().widget(0).currentIndex()
         tabname = self.centralWidget().widget(0).tabText(currTabInd)
         if tabname == 'Untitled':
+            
+            filter_string = "UWL Entry (*.uwl);;UWL Template (*.uwlt)"
             filename = QFileDialog.getSaveFileName(
-                self, 'Save File', filter='*.json')
+                self, 'Save File', filter=filter_string)
 
             if filename == ('', ''):
                 return
@@ -550,6 +724,99 @@ class WindowClass(QMainWindow):
         self.updateToolBars()
         self.centralWidget().updateCurrentTab()
 
+    def onSaveAll(self):
+        """
+        Save all open workflows.
+
+        Operation is connected to Ctrl+Shift+A hot key.
+        For untitled workflows, prompts user for save location.
+        """
+        tabsWorkflows = self.centralWidget().widget(0)
+        untitledTabs = []
+        savedCount = 0
+        errorCount = 0
+        
+        # First pass: identify untitled tabs and save titled ones
+        for ii in range(tabsWorkflows.count()):
+            tabname = tabsWorkflows.tabText(ii)
+            filename = tabsWorkflows.widget(ii).scene().mainEntry['File']
+            
+            if tabname == 'Untitled' or filename == '':
+                # Add to untitled tabs if tab name is 'Untitled' or filename is empty
+                untitledTabs.append(ii)
+            else:
+                # Save titled tabs directly (only if they have a valid filename)
+                try:
+                    tabsWorkflows.widget(ii).scene().onSave(filename)
+                    savedCount += 1
+                except Exception as e:
+                    errorCount += 1
+                    print(f"Error saving tab {ii}: {e}")
+                    # Show error message to user
+                    QMessageBox.warning(self, get_translation(babelFish, self.lankey, 'widgets', 'Save Error'), 
+                                       f"{get_translation(babelFish, self.lankey, 'widgets', 'Failed to save tab')} {ii + 1}: {str(e)}")
+        
+        # Second pass: handle untitled tabs
+        if untitledTabs:
+            filter_string = "UWL Entry (*.uwl);;UWL Template (*.uwlt)"
+            
+            # Remove any duplicate tab indices
+            untitledTabs = list(set(untitledTabs))
+            
+            for tabIndex in untitledTabs:
+                # Switch to the untitled tab
+                tabsWorkflows.setCurrentIndex(tabIndex)
+                
+                # Prompt user for save location
+                filename = QFileDialog.getSaveFileName(
+                    self, f'Save File for Tab {tabIndex + 1}', filter=filter_string)
+                
+                if filename == ('', ''):
+                    # User cancelled, skip this tab
+                    continue
+                
+                # Check if filename is already in use
+                filename = filename[0]
+                fileAlreadyOpen = False
+                
+                # Check against all other tabs (excluding current untitled tab)
+                for jj in range(tabsWorkflows.count()):
+                    if jj != tabIndex:  # Don't check against self
+                        tabfile = tabsWorkflows.widget(jj).scene().mainEntry['File']
+                        # Only check against tabs that have actual filenames (not empty strings)
+                        if tabfile != '' and filename == tabfile:
+                            fileAlreadyOpen = True
+                            break
+                
+                if fileAlreadyOpen:
+                    self.errorFilepathAreadyOpen()
+                    continue
+                
+                # Save the file
+                try:
+                    tabsWorkflows.widget(tabIndex).scene().onSave(filename)
+                    tabsWorkflows.tabNameUpdate(filename, tabIndex)
+                    savedCount += 1
+                except Exception as e:
+                    errorCount += 1
+                    print(f"Error saving untitled tab {tabIndex}: {e}")
+                    # Show error message to user
+                    QMessageBox.warning(self, get_translation(babelFish, self.lankey, 'widgets', 'Save Error'), 
+                                       f"{get_translation(babelFish, self.lankey, 'widgets', 'Failed to save tab')} {tabIndex + 1}: {str(e)}")
+        
+        # Update UI
+        self.updateToolBars()
+        self.centralWidget().updateCurrentTab()
+        
+        # Show summary message
+        if savedCount > 0:
+            message = f"Successfully saved {savedCount} file(s)"
+            if errorCount > 0:
+                message += f". {errorCount} file(s) had errors."
+            QMessageBox.information(self, get_translation(babelFish, self.lankey, 'widgets', 'Save All Complete'), message)
+        elif errorCount > 0:
+            QMessageBox.warning(self, get_translation(babelFish, self.lankey, 'widgets', 'Save All Failed'), f"{get_translation(babelFish, self.lankey, 'widgets', 'Failed to save')} {errorCount} {get_translation(babelFish, self.lankey, 'widgets', 'file(s)')}.")
+
     def onOpen(self, filenames=[]):
         """
         Open .jsons in filenames as workflow tabs.
@@ -564,8 +831,9 @@ class WindowClass(QMainWindow):
 
         """
         if filenames is False:
+            filter_string = "UWL Entry (*.uwl *.json);;UWL Template (*.uwlt)"
             filenames = QFileDialog.getOpenFileNames(
-                self, 'Open File', filter='*.json')
+                self, 'Open File', filter=filter_string)
             filenames = filenames[0]
         if filenames == []:
             return
@@ -574,19 +842,29 @@ class WindowClass(QMainWindow):
                 self.filename = filename
 
                 tabsWorkflows = self.centralWidget().widget(0)
+                fileAlreadyOpen = False
+                existingTabIndex = -1
+                
                 for ii in range(tabsWorkflows.count()):
                     tabfile = self.centralWidget().widget(0).widget(
                         ii).scene().mainEntry['File']
 
-                    if tabfile == '':
-                        fileAlreadyOpen = False
-                    else:
-                        print(filename, tabfile)
-                        fileAlreadyOpen = os.path.samefile(filename, tabfile)
+                    if tabfile != '':
+                        try:
+                            if os.path.samefile(filename, tabfile):
+                                fileAlreadyOpen = True
+                                existingTabIndex = ii
+                                break
+                        except (OSError, FileNotFoundError):
+                            # Handle case where files don't exist or can't be compared
+                            pass
 
-                    if fileAlreadyOpen:
-                        self.centralWidget().widget(0).setCurrentIndex(ii)
-                        return
+                if fileAlreadyOpen:
+                    # Ensure the existing tab is selected
+                    self.centralWidget().widget(0).setCurrentIndex(existingTabIndex)
+                    # Update the interface to reflect the selected tab
+                    self.centralWidget().updateCurrentTab()
+                    continue  # Skip to next file instead of returning
 
                 self.createTab()
 
@@ -597,8 +875,12 @@ class WindowClass(QMainWindow):
                 self.centralWidget().widget(0).tabNameUpdate(
                     self.filename, currTabInd)
 
+                # Update the interface to reflect the selected tab
                 self.updateToolBars()
-            self.centralWidget().updateCurrentTab()
+                self.centralWidget().updateCurrentTab()
+                
+                # Ensure all tabs are properly synchronized
+                self.centralWidget().updateEntries()
 
     def createTab(self):
         """Create a new, 'Untitled' tab next to the currently selected tab."""
@@ -614,8 +896,9 @@ class WindowClass(QMainWindow):
 
         """
         self.createTab()
-        self.centralWidget().subTabInd = self.centralWidget(
-        ).widget(0).currentIndex()
+        # Get the current tab index after creation and update the interface
+        currTabInd = self.centralWidget().widget(0).currentIndex()
+        self.centralWidget().subTabInd = currTabInd
         self.centralWidget().updateEntries()
         self.centralWidget().updateCurrentTab()
 
@@ -624,35 +907,36 @@ class WindowClass(QMainWindow):
         # TODO: Message is currently intercepted by inbuilt error handling.
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Critical)
-        msg.setText("Error")
+        msg.setText(get_translation(babelFish, self.lankey, 'widgets', 'Error'))
         msg.setInformativeText(
+            get_translation(babelFish, self.lankey, 'widgets', 
             """
             The selected file path is already open. Select a different path or
             close the open tab before proceeding.
-            """)
-        msg.setWindowTitle("Error")
+            """))
+        msg.setWindowTitle(get_translation(babelFish, self.lankey, 'widgets', 'Error'))
         msg.exec_()
 
     def buildEditMenu(self):
         """Add all edit menu actions to menu and connect to functions."""
-        self.editmenu = QMenu('Edit', self)
+        self.editmenu = QMenu(get_translation(babelFish, self.lankey, 'widgets', 'Edit'), self)
 
-        self.copyAction = QAction('Copy', self)
+        self.copyAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Copy'), self)
         self.copyAction.setShortcut('Ctrl+C')
         self.copyAction.triggered.connect(self.onCopy)
         self.editmenu.addAction(self.copyAction)
 
-        self.pasteAction = QAction('Paste', self)
+        self.pasteAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Paste'), self)
         self.pasteAction.setShortcut('Ctrl+V')
         self.pasteAction.triggered.connect(self.onPaste)
         self.editmenu.addAction(self.pasteAction)
 
-        self.selectAllAction = QAction('Select All', self)
+        self.selectAllAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Select All'), self)
         self.selectAllAction.setShortcut('Ctrl+A')
         self.selectAllAction.triggered.connect(self.onSelectAll)
         self.editmenu.addAction(self.selectAllAction)
 
-        self.delAction = QAction('Delete', self)
+        self.delAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Delete'), self)
         self.delAction.triggered.connect(self.onDelete)
         self.editmenu.addAction(self.delAction)
 
@@ -699,44 +983,44 @@ class WindowClass(QMainWindow):
 
     def buildInsertMenu(self):
         """Add all insert menu actions to menu and connect to functions."""
-        self.insertmenu = QMenu('Insert', self)
+        self.insertmenu = QMenu(get_translation(babelFish, self.lankey, 'widgets', 'Insert'), self)
 
-        self.actionAction = QAction('Create Action Block', self)
+        self.actionAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Create Action Block'), self)
         self.actionAction.setShortcut('Shift+D')
         self.actionAction.triggered.connect(self.onAddAction)
         self.insertmenu.addAction(self.actionAction)
 
-        self.itemAction = QAction('Create Item Block', self)
+        self.itemAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Create Item Block'), self)
         self.itemAction.setShortcut('Shift+F')
         self.itemAction.triggered.connect(self.onAddItem)
         self.insertmenu.addAction(self.itemAction)
 
-        self.sectionAction = QAction('Create Section Block', self)
+        self.sectionAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Create Section Block'), self)
         self.sectionAction.setShortcut('Shift+G')
         self.sectionAction.triggered.connect(self.onSection)
         self.insertmenu.addAction(self.sectionAction)
 
-        self.insertAction = QAction('Insert from File', self)
+        self.insertAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Insert from File'), self)
         self.insertAction.setShortcut('Ctrl+I')
         self.insertAction.triggered.connect(self.onLoad)
         self.insertmenu.addAction(self.insertAction)
 
-        self.insertSectAction = QAction('Insert from File as Section', self)
+        self.insertSectAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Insert from File as Section'), self)
         self.insertSectAction.setShortcut('Ctrl+Shift+I')
         self.insertSectAction.triggered.connect(self.onLoadasSection)
         self.insertmenu.addAction(self.insertSectAction)
 
-        self.addAAction = QAction('Add A-Type Connections', self)
+        self.addAAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Add A-Type Connections'), self)
         self.addAAction.setShortcut('Shift+1')
         self.addAAction.triggered.connect(self.onAddAType)
         self.insertmenu.addAction(self.addAAction)
 
-        self.addBAction = QAction('Add B-Type Connections', self)
+        self.addBAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Add B-Type Connections'), self)
         self.addBAction.setShortcut('Shift+2')
         self.addBAction.triggered.connect(self.onAddBType)
         self.insertmenu.addAction(self.addBAction)
 
-        self.addCAction = QAction('Add C-Type Connections', self)
+        self.addCAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Add C-Type Connections'), self)
         self.addCAction.setShortcut('Shift+3')
         self.addCAction.triggered.connect(self.onAddCType)
         self.insertmenu.addAction(self.addCAction)
@@ -813,6 +1097,8 @@ class WindowClass(QMainWindow):
         currTabInd = self.centralWidget().widget(0).currentIndex()
         self.centralWidget().widget(0).widget(currTabInd).scene().onAddCType()
 
+
+
     def onLoad(self):
         """
         Load workflow from file and insert to workflow at mouse location.
@@ -841,16 +1127,6 @@ class WindowClass(QMainWindow):
 
     def _createToolBars(self):
         """Build all movable tool bars on MainWindow."""
-        filedirToolBar = QToolBar('File Directory', self)
-        filedirToolBar.setFloatable(True)
-        self.addToolBar(Qt.RightToolBarArea, filedirToolBar)
-        self.dirTree = QTreeWidget()
-        self.dirTree.itemDoubleClicked.connect(self.onTreeOpen)
-        self.dirTree.setHeaderHidden(True)
-        self.dirTree.clear()
-        self.updateDirTree(os.getcwd(), self.dirTree)
-        filedirToolBar.addWidget(self.dirTree)
-
         self.baseToolBar = QToolBar('Base Entry Features', self)
         self.baseToolBar.setFloatable(True)
         self.addToolBar(Qt.RightToolBarArea, self.baseToolBar)
@@ -860,6 +1136,56 @@ class WindowClass(QMainWindow):
         self.actionContextToolBar.setFloatable(True)
         self.addToolBar(Qt.RightToolBarArea, self.actionContextToolBar)
         self.buildActionContext()
+
+    def buildDesignMenu(self):
+        """Build feedback, tutorial, and controls actions in help menu."""
+        self.designmenu = QMenu(get_translation(babelFish, self.lankey, 'widgets', 'Batch'), self)
+
+        self.expselectAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Design Experiment Set'), self)
+        self.expselectAction.triggered.connect(self.openExperimentDesignWindow)
+        self.designmenu.addAction(self.expselectAction)
+
+        self.buildtablemapAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Build Table Map'), self)
+        self.buildtablemapAction.triggered.connect(self.tablemapBuildWindow)
+        self.designmenu.addAction(self.buildtablemapAction)
+
+        self.importtableAction = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Import Table'), self)
+        self.importtableAction.triggered.connect(self.openTableImportWindow)
+        self.designmenu.addAction(self.importtableAction)
+    
+    def openExperimentDesignWindow(self):
+        self.prompt = ExperimentDesignWindow(lankey=self.lankey)
+        self.prompt.setWindowTitle("Design of Experiments Tool")
+        self.prompt.setAttribute(Qt.WA_DeleteOnClose)
+        self.prompt.windowSignal.connect(self.transferDesignWindowData)
+        self.prompt.show()
+        
+    def transferDesignWindowData(self, data):
+            # print(data)
+            pass
+    
+    def tablemapBuildWindow(self):
+        self.prompt = BuildTableMapWindow(lankey=self.lankey)
+        self.prompt.setWindowTitle("Excel Table Export Tool")
+        self.prompt.setAttribute(Qt.WA_DeleteOnClose)
+        self.prompt.windowSignal.connect(self.transferBuildTableMapWindowData)
+        self.prompt.show()
+
+    def transferBuildTableMapWindowData(self, data):
+        pass
+
+    def openTableImportWindow(self):
+        self.prompt = TableMapImportWindow(lankey=self.lankey)
+        self.prompt.setWindowTitle("Excel Table Import Tool")
+        self.prompt.setAttribute(Qt.WA_DeleteOnClose)
+        self.prompt.windowSignal.connect(self.transferTableMapImportWindowData)
+        self.prompt.show()
+
+    def transferTableMapImportWindowData(self, data):
+        if data != []:
+            self.onOpen(data)
+
+    
 
     def buildActionContext(self):
         """Construct blank label widget and add placeholder context."""
@@ -884,7 +1210,7 @@ class WindowClass(QMainWindow):
         self.contextLbl.clear()
 
         pixmap = QPixmap('Context//Blank_v1.png')
-        
+
         try:
             if action is None:
                 action = 'Action'
@@ -894,14 +1220,14 @@ class WindowClass(QMainWindow):
                     func_ver = '02'
                 else:
                     func_ver = '01'
-                    
-                func = babelFish['Action'][action][self.lankey]['Func'][func_ver]
+                func = babelFish['Action'][
+                    action][self.lankey]['Func'][func_ver]
                 action = babelFish['Action'][action][self.lankey]['Name']
                 step = func('A', 'B', 'C')
         except Exception as e:
-            print(e)
+            #print(e)
+            # # print(e)
             step = f"{action} is not listed."
-            
 
         pen = QPen(QColor(255, 255, 255))
         font = QFont('Arial')
@@ -934,30 +1260,6 @@ class WindowClass(QMainWindow):
             QSize(270, 270), Qt.KeepAspectRatio))
         self.actionContextToolBar.addWidget(self.contextLbl)
 
-    def updateDirTree(self, directory, parentTree):
-        """Update directory tree tool with full file directory."""
-        # TODO: Currently runs on main.py cwd. Add main directory navigation.
-        for item in os.listdir(directory):
-            tempPath = directory + '\\' + item
-            if os.path.isdir(tempPath):
-                parentItem = QTreeWidgetItem(
-                    parentTree, [os.path.basename(item)])
-                self.updateDirTree(tempPath, parentItem)
-            elif os.path.splitext(tempPath)[-1] == '.json':
-                parentItem = QTreeWidgetItem(
-                    parentTree, [os.path.basename(item)])
-                parentItem.filepath = tempPath
-
-    def onTreeOpen(self, item):
-        """
-        Open file selected from tree directory tool.
-
-        Method is connected to double click event on all tree directory items.
-
-        """
-        if item.childCount() == 0:
-            self.onOpen([item.filepath])
-
     def updateBase(self):
         """Rebuild base information tool bar widgets from workflow."""
         if self.baseFeatures != []:
@@ -966,9 +1268,19 @@ class WindowClass(QMainWindow):
             self.baseFeatures = None
         self.baseFeatures = QWidget()
 
+        # Check if we're currently on the Table tab
+        if hasattr(self, 'centralWidget') and self.centralWidget() is not None:
+            currentMainTab = self.centralWidget().currentIndex()
+            if currentMainTab == 1:  # Table tab
+                # Create disabled base information tool for Table tab
+                self._createDisabledBaseInfoTool()
+                return
+
         currTabInd = self.centralWidget().widget(0).currentIndex()
         if self.centralWidget().widget(0).widget(
                 currTabInd) is None:
+            # Handle case when no tabs exist - create empty description box
+            self._createEmptyBaseInfoTool()
             return
 
         baseEntry = self.centralWidget().widget(0).widget(
@@ -977,8 +1289,7 @@ class WindowClass(QMainWindow):
         self.layout = QVBoxLayout()
 
         layoutName = QHBoxLayout()
-        listind = babelFish['ui']['en']['widgets'].index('Entry Name: ')
-        nameStr = babelFish['ui'][self.lankey]['widgets'][listind] + \
+        nameStr = get_translation(babelFish, self.lankey, 'widgets', 'Entry Name: ') + \
             baseEntry['Name']
         nameLabel = QLabel(nameStr)
         nameLabel.setWordWrap(True)
@@ -986,8 +1297,7 @@ class WindowClass(QMainWindow):
         self.layout.addLayout(layoutName)
 
         layoutFile = QHBoxLayout()
-        listind = babelFish['ui']['en']['widgets'].index('File Path: ')
-        fileStr = babelFish['ui'][self.lankey]['widgets'][listind] + \
+        fileStr = get_translation(babelFish, self.lankey, 'widgets', 'File Path: ') + \
             baseEntry['File']
         fileLabel = QLabel(fileStr)
         fileLabel.setWordWrap(True)
@@ -995,9 +1305,7 @@ class WindowClass(QMainWindow):
         self.layout.addLayout(layoutFile)
 
         layoutDesc = QVBoxLayout()
-        listind = babelFish['ui']['en']['widgets'].index(
-            'Experiment Description:')
-        descStr = babelFish['ui'][self.lankey]['widgets'][listind]
+        descStr = get_translation(babelFish, self.lankey, 'widgets', 'Experiment Description:')
         descLabel = QLabel(descStr)
         layoutDesc.addWidget(descLabel)
         self.descWidget = QTextEdit()
@@ -1009,17 +1317,87 @@ class WindowClass(QMainWindow):
         self.baseFeatures.setLayout(self.layout)
         self.baseToolBar.addWidget(self.baseFeatures)
 
+    def _createDisabledBaseInfoTool(self):
+        """Create a disabled base information tool for the Table tab."""
+        self.layout = QVBoxLayout()
+
+        layoutName = QHBoxLayout()
+        nameStr = get_translation(babelFish, self.lankey, 'widgets', 'Entry Name: ') + 'N/A (Table View)'
+        nameLabel = QLabel(nameStr)
+        nameLabel.setWordWrap(True)
+        nameLabel.setEnabled(False)
+        layoutName.addWidget(nameLabel)
+        self.layout.addLayout(layoutName)
+
+        layoutFile = QHBoxLayout()
+        fileStr = get_translation(babelFish, self.lankey, 'widgets', 'File Path: ') + 'N/A'
+        fileLabel = QLabel(fileStr)
+        fileLabel.setWordWrap(True)
+        fileLabel.setEnabled(False)
+        layoutFile.addWidget(fileLabel)
+        self.layout.addLayout(layoutFile)
+
+        layoutDesc = QVBoxLayout()
+        descStr = get_translation(babelFish, self.lankey, 'widgets', 'Experiment Description:')
+        descLabel = QLabel(descStr)
+        descLabel.setEnabled(False)
+        layoutDesc.addWidget(descLabel)
+        self.descWidget = QTextEdit()
+        self.descWidget.setText('Base information tool is disabled in Table view.')
+        self.descWidget.setEnabled(False)
+        layoutDesc.addWidget(self.descWidget)
+        self.layout.addLayout(layoutDesc)
+
+        self.baseFeatures.setLayout(self.layout)
+        self.baseToolBar.addWidget(self.baseFeatures)
+
+    def _createEmptyBaseInfoTool(self):
+        """Create an empty base information tool when no tabs exist."""
+        self.layout = QVBoxLayout()
+
+        layoutName = QHBoxLayout()
+        nameStr = get_translation(babelFish, self.lankey, 'widgets', 'Entry Name: ') + 'Untitled'
+        nameLabel = QLabel(nameStr)
+        nameLabel.setWordWrap(True)
+        layoutName.addWidget(nameLabel)
+        self.layout.addLayout(layoutName)
+
+        layoutFile = QHBoxLayout()
+        fileStr = get_translation(babelFish, self.lankey, 'widgets', 'File Path: ') + ''
+        fileLabel = QLabel(fileStr)
+        fileLabel.setWordWrap(True)
+        layoutFile.addWidget(fileLabel)
+        self.layout.addLayout(layoutFile)
+
+        layoutDesc = QVBoxLayout()
+        descStr = get_translation(babelFish, self.lankey, 'widgets', 'Experiment Description:')
+        descLabel = QLabel(descStr)
+        layoutDesc.addWidget(descLabel)
+        self.descWidget = QTextEdit()
+        self.descWidget.setText('')
+        self.descWidget.textChanged.connect(self.updateEntryBase)
+        layoutDesc.addWidget(self.descWidget)
+        self.layout.addLayout(layoutDesc)
+
+        self.baseFeatures.setLayout(self.layout)
+        self.baseToolBar.addWidget(self.baseFeatures)
+
     def updateEntryBase(self):
         """Update workflow data from base information tool bar widget."""
+        # Don't update if we're on the Table tab
+        if hasattr(self, 'centralWidget') and self.centralWidget() is not None:
+            currentMainTab = self.centralWidget().currentIndex()
+            if currentMainTab == 1:  # Table tab
+                return
+        
         currTabInd = self.centralWidget().widget(0).currentIndex()
-        self.centralWidget().widget(0).widget(currTabInd).scene(
-        ).mainEntry['Description'] = self.descWidget.toPlainText()
-        self.centralWidget().updateEntries()
+        if self.centralWidget().widget(0).widget(currTabInd) is not None:
+            self.centralWidget().widget(0).widget(currTabInd).scene(
+            ).mainEntry['Description'] = self.descWidget.toPlainText()
+            self.centralWidget().updateEntries()
 
     def updateToolBars(self):
         """Rebuild tool bars from current work flow data."""
-        self.dirTree.clear()
-        self.updateDirTree(os.getcwd(), self.dirTree)
         self.updateBase()
         self.updateEntryBase()
 
@@ -1027,12 +1405,13 @@ class WindowClass(QMainWindow):
 class TutorialWindow(QTabWidget):
     """Manage tutorial popup window."""
 
-    def __init__(self):
+    def __init__(self, lankey='en'):
         QTabWidget.__init__(self)
-
+        
+        self.lankey = lankey
         self.filepath = 'tutorial'
 
-        self.setWindowTitle('Tutorial')
+        self.setWindowTitle(get_translation(babelFish, self.lankey, 'widgets', 'Tutorial'))
         self.setTabPosition(QTabWidget.TabPosition.West)
 
         self.addQuickstart()
@@ -1043,11 +1422,13 @@ class TutorialWindow(QTabWidget):
         self.quickstartTab = QTabWidget()
         self.addQuickstartTabs()
 
-        self.addTab(self.quickstartTab, 'Quick Start')
+        self.addTab(self.quickstartTab, get_translation(babelFish, self.lankey, 'widgets', 'Quick Start'))
 
     def addQuickstartTabs(self):
         """Add step tabs to quick start tutorial."""
-        for file in os.listdir(self.filepath_quickstart):
+        files = os.listdir(self.filepath_quickstart)
+        files.sort()
+        for file in files:
             if file.endswith('.png'):
                 fullpath = os.path.join(self.filepath_quickstart, file)
                 name = file[:-4]
@@ -1074,11 +1455,11 @@ class TutorialWindow(QTabWidget):
 
                 btnlayout = QHBoxLayout()
 
-                btnleft = QPushButton(' < ')
+                btnleft = QPushButton(get_translation(babelFish, self.lankey, 'widgets', ' < '))
                 btnleft.clicked.connect(self.quickstartLeft)
                 btnlayout.addWidget(btnleft)
 
-                btnright = QPushButton(' > ')
+                btnright = QPushButton(get_translation(babelFish, self.lankey, 'widgets', ' > '))
                 btnright.clicked.connect(self.quickstartRight)
                 btnlayout.addWidget(btnright)
 
@@ -1107,6 +1488,10 @@ class TabViewController(QTabWidget):
         QTabWidget.__init__(self, parent)
         self.parent = parent
         self.lankey = lankey
+        self.rootwindow = rootwindow
+        
+        if self.rootwindow is not None:
+            self.tableCellViewMode = self.rootwindow.tableCellViewMode
 
         self.setTabPosition(QTabWidget.TabPosition.West)
 
@@ -1133,11 +1518,48 @@ class TabViewController(QTabWidget):
         self.currentChanged.connect(self.onCurrentChanged)
 
         self.subTabInd = 0
+        self._lastActiveTab = 0  # Track the last active main tab
 
     def onCurrentChanged(self):
         """Update all workflow data when a cell value is changed."""
-        self.updateEntries()
-        self.updateCurrentTab()
+        currentIndex = self.currentIndex()
+        
+        # Check if we're switching to the Table tab
+        if currentIndex == 1:  # Table tab
+            self._disableBaseInformationTool()
+        else:
+            self._enableBaseInformationTool()
+            # Only update entries if we're not on the table tab
+            self.updateEntries()
+            self.updateCurrentTab()
+            # Ensure file tabs are synchronized
+            self.syncFileTabs()
+        
+        # Update save actions state in main window
+        if hasattr(self, 'rootwindow') and self.rootwindow is not None:
+            self.rootwindow.updateSaveActionsState()
+            # Update toolbars to refresh experiment description box
+            self.rootwindow.updateToolBars()
+        
+        self._lastActiveTab = currentIndex
+
+    def _disableBaseInformationTool(self):
+        """Disable the base information tool when on Table tab."""
+        if hasattr(self, 'rootwindow') and self.rootwindow is not None:
+            if hasattr(self.rootwindow, 'baseFeatures') and self.rootwindow.baseFeatures is not None:
+                self.rootwindow.baseFeatures.setEnabled(False)
+                # Grey out the description widget
+                if hasattr(self.rootwindow, 'descWidget'):
+                    self.rootwindow.descWidget.setEnabled(False)
+
+    def _enableBaseInformationTool(self):
+        """Enable the base information tool when not on Table tab."""
+        if hasattr(self, 'rootwindow') and self.rootwindow is not None:
+            if hasattr(self.rootwindow, 'baseFeatures') and self.rootwindow.baseFeatures is not None:
+                self.rootwindow.baseFeatures.setEnabled(True)
+                # Enable the description widget
+                if hasattr(self.rootwindow, 'descWidget'):
+                    self.rootwindow.descWidget.setEnabled(True)
 
     def updateEntries(self):
         """Rebuild workflow data from workflows and distribute to all tabs."""
@@ -1151,7 +1573,7 @@ class TabViewController(QTabWidget):
                 c).scene().mainEntry
 
             c = c + 1
-
+        
         self.updateEntryTable()
         self.updateEntryText()
 
@@ -1162,28 +1584,84 @@ class TabViewController(QTabWidget):
 
     def updateEntryTable(self):
         """Empty and rebuild all data in table controller."""
+        if not hasattr(self, "entriesWorkflow") or self.entriesWorkflow is None:
+            return
         self.tableTab.clear()
         self.buildTableNames()
         self.entriesTable = pd.DataFrame([], index=self.tableNames)
         self.addDatatoTable()
         self.tableTab.updateTable(self.entriesTable)
+        # self.updateTableViewMode()
         self.tableTab.tabletoWorkflowIndex = self.tabletoWorkflowIndex
+
+    def updateTableViewMode(self):
+        self.tableCellViewMode = self.rootwindow.tableCellViewMode
+        if self.tableCellViewMode == "show_all":
+            self.showAllTableRows()
+        elif self.tableCellViewMode == "show_empty":
+            self.hideNonEmptyTableRows()
+        elif self.tableCellViewMode == "show_unique":
+            self.hideNonUniqueTableRows()
+
+    def showAllTableRows(self):
+        for row_index in range(self.entriesTable.shape[0]):
+            self.tableTab.showRow(row_index)
+
+    def hideNonEmptyTableRows(self):
+        self.showAllTableRows()
+        for row_index in range(self.entriesTable.shape[0]):
+            if all(self.entriesTable.iloc[row_index].apply(lambda x: x != "" and x is not None)):
+                self.tableTab.hideRow(row_index)
+
+    def hideNonUniqueTableRows(self):
+        self.showAllTableRows()
+        for row_index in range(self.entriesTable.shape[0]):
+            if len(self.entriesTable.iloc[row_index].unique()) == 1:
+                self.tableTab.hideRow(row_index)
 
     def updateCurrentTab(self):
         """Set tabs to match current tab across data views."""
-        self.workflowTab.setCurrentIndex(self.subTabInd)
-        self.plainTextTab.setCurrentIndex(self.subTabInd)
-        self.rawTextTab.setCurrentIndex(self.subTabInd)
+        # Only update if we're not on the table tab
+        if self.currentIndex() != 1:
+            self.workflowTab.setCurrentIndex(self.subTabInd)
+            self.plainTextTab.setCurrentIndex(self.subTabInd)
+            self.rawTextTab.setCurrentIndex(self.subTabInd)
+            
+            # Update the base information tool with the current file's information
+            self._updateBaseInformationTool()
+
+    def _updateBaseInformationTool(self):
+        """Update the base information tool with the current file's information."""
+        if hasattr(self, 'rootwindow') and self.rootwindow is not None:
+            self.rootwindow.updateToolBars()
+    
+    def syncFileTabs(self):
+        """Ensure all file tabs are synchronized across all main tabs."""
+        if self.currentIndex() != 1:  # Not on Table tab
+            currentFileIndex = self.workflowTab.currentIndex()
+            self.subTabInd = currentFileIndex
+            self.plainTextTab.setCurrentIndex(currentFileIndex)
+            self.rawTextTab.setCurrentIndex(currentFileIndex)
+
+    def updateTabTexts(self, babelFish, lankey):
+        """Update the main tab texts when language changes."""
+        # Update the four main tabs: Workflows, Table, Protocol, Raw
+        tab_texts = ['Workflows', 'Table', 'Protocol', 'Raw']
+        for i, text in enumerate(tab_texts):
+            translated_text = get_translation(babelFish, lankey, 'widgets', text)
+            self.setTabText(i, translated_text)
 
     def buildTableNames(self):
         """Iterate through all work flows and add unique parameter names."""
         self.tableNames = []
+        
         for entryID in self.entriesWorkflow.keys():
             self.entrynames = []
             entry = self.entriesWorkflow[entryID]
+            self.linkIDs = []
             self.addSectionTableNames(section=entry)
 
-    def addSectionTableNames(self, section, prevSectName=''):
+    def addSectionTableNames(self, section, prevSectName='', keyPath=[]):
         """
         Add unique table names to tableNames class attribute.
 
@@ -1203,19 +1681,30 @@ class TabViewController(QTabWidget):
             [Previous Level]. The default is ''.
 
         """
+        if not hasattr(self, "linkIDs"):
+            self.linkIDs = []
+
+        keyPath = copy.deepcopy(keyPath)
         if section['Type'] == 'root':
             sectName = ''
+            self.keyPathLists = []
         else:
             sectName = prevSectName + section['Name'] + ' > '
-
+            keyPath.append(section['ID'])
         for objKey in section['Objects'].keys():
             block = section['Objects'][objKey]
             if block['Type'] in ['Action', 'Item']:
+                if block['Type'] == "Item" and block["Link"]:
+                    if block['Link ID'] not in self.linkIDs:
+                        self.linkIDs.append(block['Link ID'])
+                    else:
+                        continue
                 try:
                     blockName = babelFish[block['Type']
                                           ][block['Name']][self.lankey]['Name']
                 except Exception as e:
-                    print(e)
+                    # print(e)
+                    ##print(e)
                     blockName = block['Name']
                 blockName = blockName + ' > '
                 if block['Type'] == 'Action':
@@ -1223,20 +1712,26 @@ class TabViewController(QTabWidget):
                 else:
                     actionMod = ''
 
-                for param in block['Parameters']:
+                for ii_param, param in enumerate(block['Parameters']):
                     try:
                         param_type = babelFish[block['Type'] + ' Parameter']
                         param = param_type[param][self.lankey]['Name']
                     except Exception as e:
-                        print(e)
+                        # print(e)
+                        #print(e)
                         param = param
 
                     entryName = sectName + blockName + param + actionMod
                     entryName = self.fixEntryNameDuplicates(entryName)
                     if entryName not in self.tableNames:
                         self.tableNames.append(entryName)
+                        tempKeyPath = keyPath.copy()
+                        tempKeyPath.append(block['ID'])
+                        tempKeyPath.append(ii_param)
+                        self.keyPathLists.append(tempKeyPath.copy())
             elif block['Type'] == 'Section':
-                self.addSectionTableNames(section=block, prevSectName=sectName)
+                self.addSectionTableNames(section=block, prevSectName=sectName,
+                                          keyPath=keyPath)
 
     def getActionModifier(self, section, block):
         """
@@ -1272,7 +1767,8 @@ class TabViewController(QTabWidget):
                     BBlockName = babelFish[
                         'Item'][BBlockName][self.lankey]['Name']
                 except Exception as e:
-                    print(e)
+                    # print(e)
+                    #print(e)
                     pass
                 actionMod = ' [' + BBlockName + ' to ' + ABlockName + '] '
             elif block['Subtype'] == 'Remove':
@@ -1284,7 +1780,8 @@ class TabViewController(QTabWidget):
                     BBlockName = babelFish[
                         'Item'][BBlockName][self.lankey]['Name']
                 except Exception as e:
-                    print(e)
+                    # print(e)
+                    #print(e)
                     pass
                 actionMod = ' [' + BBlockName + ' from ' + ABlockName + '] '
             elif block['Subtype'] == 'Modify':
@@ -1293,11 +1790,13 @@ class TabViewController(QTabWidget):
                     ABlockName = babelFish[
                         'Item'][ABlockName][self.lankey]['Name']
                 except Exception as e:
-                    print(e)
+                    # print(e)
+                    #print(e)
                     pass
                 actionMod = ' [' + ABlockName + '] '
         except Exception as e:
-            print(e)
+            # print(e)
+            #print(e)
             actionMod = ''
 
         return actionMod
@@ -1344,11 +1843,12 @@ class TabViewController(QTabWidget):
             self.tempCol = []
             for ii in range(len(self.tableNames)):
                 self.tempCol.append(None)
-
+            self.linkIDs = []
             self.addSectionDatatoCol(section=entry)
 
             self.entriesTable.insert(self.c, entryID, self.tempCol)
             self.c += 1
+
 
     def addSectionDatatoCol(self, section, prevSectName='', prevSectPath=[]):
         """
@@ -1380,11 +1880,17 @@ class TabViewController(QTabWidget):
             block = section['Objects'][objKey]
             blockName = block['Name'] + ' > '
             if block['Type'] in ['Action', 'Item']:
+                if block['Type'] == "Item" and block["Link"]:
+                    if block['Link ID'] not in self.linkIDs:
+                        self.linkIDs.append(block['Link ID'])
+                    else:
+                        continue
                 try:
                     blockName = babelFish[block['Type']
                                           ][block['Name']][self.lankey]['Name']
                 except Exception as e:
-                    print(e)
+                    # print(e)
+                    #print(e)
                     blockName = block['Name']
                 blockName = blockName + ' > '
 
@@ -1395,7 +1901,8 @@ class TabViewController(QTabWidget):
                         param_type = babelFish[block['Type'] + ' Parameter']
                         param = param_type[param][self.lankey]['Name']
                     except Exception as e:
-                        print(e)
+                        # print(e)
+                        #print(e)
                         param = param
 
                     if block['Type'] == 'Action':
@@ -1475,6 +1982,8 @@ class TabTableController(QTableWidget):
             Data frame containing all table values.
 
         """
+        self.data_df = data
+
         cols = data.columns
         rows = data.index
 
@@ -1484,7 +1993,7 @@ class TabTableController(QTableWidget):
         self.setVerticalHeaderLabels(rows)
         self.setHorizontalHeaderLabels(cols)
 
-        for n, key in enumerate(sorted(data.keys())):
+        for n, key in enumerate(data.keys()):
             for m, item in enumerate(data[key]):
                 newitem = QTableWidgetItem(item)
                 if item is None:  # Gray out cells without existing data.
@@ -1514,10 +2023,10 @@ class TabTableController(QTableWidget):
              ] in self.tabletoWorkflowIndex:
             workflow = self.parent.workflowTab.widget(ii).scene().mainEntry
             self.assignValThroughSections(
-                workflow, ii, jj, entry, sectionPath, item, ii_param)
+                workflow, ii, jj, entry, sectionPath, item, ii_param, rootworkflow=workflow)
 
     def assignValThroughSections(self, section, ii, jj, entry, sectionPath,
-                                 item, ii_param):
+                                 item, ii_param, rootworkflow):
         """
         Update work flow data through sections with table data.
 
@@ -1540,13 +2049,28 @@ class TabTableController(QTableWidget):
 
         """
         if sectionPath == []:
-            section['Objects'][item]['Values'][ii_param] = self.item(
-                jj, ii).text()
+            value = self.item(jj, ii).text()
+
+            if section['Objects'][item]['Type'] == "Item" and section['Objects'][item]['Link'] is True:
+                linkID = section['Objects'][item]['Link ID']
+                self.applyValtoLinkedItems(linkID, value, rootworkflow)
+            else:
+                section['Objects'][item]['Values'][ii_param] = value
         else:
             section = section['Objects'][sectionPath[0]]
             sectionPath = sectionPath[1:].copy()
             self.assignValThroughSections(
-                section, ii, jj, entry, sectionPath, item, ii_param)
+                section, ii, jj, entry, sectionPath, item, ii_param, rootworkflow)
+
+    def applyValtoLinkedItems(self, linkID, value, section):
+        for key in section['Objects'].keys():
+            if section['Objects'][key]['Type'] == 'Item' and \
+               section['Objects'][key]['Link'] is True and \
+               section['Objects'][key]['Link ID'] == linkID:
+                for ii_param in range(len(section['Objects'][key]['Values'])):
+                    section['Objects'][key]['Values'][ii_param] = value
+            elif section['Objects'][key]['Type'] == 'Section':
+                self.applyValtoLinkedItems(linkID, value, section['Objects'][key])
 
     def getPriorityList(self, workflow):
         """
@@ -1577,6 +2101,13 @@ class TabTableController(QTableWidget):
 
         return priority
 
+    def onTableExport(self):
+        # try:
+        options = QFileDialog.Options()
+        file_path, _ = QFileDialog.getSaveFileName(self, get_translation(babelFish, self.lankey, 'widgets', 'Save to Excel'), "", get_translation(babelFish, self.lankey, 'widgets', 'Excel Files (*.xlsx);;All Files (*)'), options=options)
+        # df = self.get_dataframe()
+        self.data_df.to_excel(file_path, index=True, header=True)
+
 
 class TabPlaintextController(QTabWidget):
     """Manage plain written text protocol data view tab."""
@@ -1587,11 +2118,12 @@ class TabPlaintextController(QTabWidget):
         self.lankey = lankey
 
         try:
-            self.textconstlist = babelFish[
-                'ui'][self.lankey]['plain text const']
+            # Initialize with empty list, will be populated as needed
+            self.textconstlist = []
         except Exception as e:
-            print(e)
-            self.textconstlist = ['' for ii in range(30)]
+            # print(e)
+            #print(e)
+            self.textconstlist = []
 
         self.actionDict = babelFish['Action']
         self.itemDict = babelFish['Item']
@@ -1619,7 +2151,11 @@ class TabPlaintextController(QTabWidget):
         """
         self.parent.subTabInd = index
         self.parent.updateCurrentTab()
-        self.parent.parent.updateToolBars()
+        # Ensure all file tabs are synchronized
+        self.parent.syncFileTabs()
+        # Update the base information tool with the current file's information
+        if hasattr(self.parent, 'rootwindow') and self.parent.rootwindow is not None:
+            self.parent.rootwindow.updateToolBars()
 
     def onClose(self, ind):
         """
@@ -1669,8 +2205,6 @@ class TabPlaintextController(QTabWidget):
 
         """
         try:
-            self.textconstlist = babelFish[
-                'ui'][self.lankey]['plain text const']
             self.itemDict = babelFish['Item']
             text = ''
 
@@ -1693,9 +2227,9 @@ class TabPlaintextController(QTabWidget):
             text = self.generateProtocolText(text, workflow)
 
         except Exception as e:
-            self.textconstlist = [' ' for ii in range(30)]
-            print(e)
-            text = '** ' + self.textconstlist[0] + ' **'
+            # print(e)
+            #print(e)
+            text = '** ' + get_translation(babelFish, self.lankey, 'plain text const', 'Protocol Generation Error') + ' **'
 
         return text
 
@@ -1717,12 +2251,13 @@ class TabPlaintextController(QTabWidget):
 
         """
         try:
-            text += self.textconstlist[1] + ' ' + str(workflow['Name']) + '\n'
-            text += self.textconstlist[2] + ' ' + \
-                str(workflow['Description']) + '\n'
+            text += get_translation(babelFish, self.lankey, 'plain text const', 'Experiment Name:') + ' ' + str(workflow['Name']) + '\n'
+            text += get_translation(babelFish, self.lankey, 'plain text const', 'Experiment Description:') + ' ' + \
+                    str(workflow['Description']) + '\n'
         except Exception as e:
-            print(e)
-            text = text + '** ' + self.textconstlist[3] + ' **'
+            # print(e)
+            #print(e)
+            text = text + '** ' + get_translation(babelFish, self.lankey, 'plain text const', 'Base Information Transcription Error') + ' **'
         text = text + '\n'
         return text
 
@@ -1751,7 +2286,7 @@ class TabPlaintextController(QTabWidget):
         try:
             _tab = '   '
             if sectName == '':
-                text = text + self.textconstlist[4] + ' \n'
+                text = text + get_translation(babelFish, self.lankey, 'plain text const', 'Additional Information') + ' \n'
             itemNames = []
             for key in workflow['Objects'].keys():
                 if workflow['Objects'][key]['Type'] == 'Section':
@@ -1777,8 +2312,9 @@ class TabPlaintextController(QTabWidget):
                     text = text + '\n'
 
         except Exception as e:
-            print(e)
-            text = text + '** ' + self.textconstlist[5] + ' **'
+            # print(e)
+            #print(e)
+            text = text + '** ' + get_translation(babelFish, self.lankey, 'plain text const', 'Additional Information List Transcription Error') + ' **'
         return text
 
     def generateMaterialsText(self, text, workflow, sectName=''):
@@ -1806,7 +2342,7 @@ class TabPlaintextController(QTabWidget):
         try:
             _tab = '   '
             if sectName == '':
-                text = text + self.textconstlist[6] + ' \n'
+                text = text + get_translation(babelFish, self.lankey, 'plain text const', 'Materials') + ' \n'
             itemNames = []
             for key in workflow['Objects'].keys():
                 if workflow['Objects'][key]['Type'] == 'Section':
@@ -1826,8 +2362,9 @@ class TabPlaintextController(QTabWidget):
                     text = self.addNoteText(workflow, text, key)
                     text = text + '\n'
         except Exception as e:
-            print(e)
-            text = text + '** ' + self.textconstlist[7] + ' **'
+            # print(e)
+            #print(e)
+            text = text + '** ' + get_translation(babelFish, self.lankey, 'plain text const', 'Materials List Transcription Error') + ' **'
         return text
 
     def checkItemForConnections(self, workflow, checkkey):
@@ -1885,7 +2422,7 @@ class TabPlaintextController(QTabWidget):
         try:
             _tab = '   '
             if sectName == '':
-                text = text + self.textconstlist[8] + ' \n'
+                text = text + get_translation(babelFish, self.lankey, 'plain text const', 'Equipment') + ' \n'
             itemNames = []
             for key in workflow['Objects'].keys():
                 if workflow['Objects'][key]['Type'] == 'Section':
@@ -1906,8 +2443,9 @@ class TabPlaintextController(QTabWidget):
                     text = self.addNoteText(workflow, text, key)
                     text = text + '\n'
         except Exception as e:
-            print(e)
-            text = text + '** ' + self.textconstlist[9] + ' **'
+            # print(e)
+            #print(e)
+            text = text + '** ' + get_translation(babelFish, self.lankey, 'plain text const', 'Equipment List Transcription Error') + ' **'
         return text
 
     def getUniqueItemName(self, workflow, key, itemNames):
@@ -1940,7 +2478,8 @@ class TabPlaintextController(QTabWidget):
             rootItemName_en = workflow['Objects'][key]['Name']
             rootItemName = self.itemDict[rootItemName_en][self.lankey]['Name']
         except Exception as e:
-            print(e)
+            # print(e)
+            #print(e)
             rootItemName = workflow['Objects'][key]['Name']
         itemName = rootItemName
 
@@ -1976,7 +2515,7 @@ class TabPlaintextController(QTabWidget):
         """
         try:
             if level == 1:
-                text = text + self.textconstlist[10] + ' \n'
+                text = text + get_translation(babelFish, self.lankey, 'plain text const', 'Procedure') + ' \n'
 
             itemPriority, actionPriority = self.getPriorityList(workflow)
             _tab = '   '
@@ -2001,12 +2540,14 @@ class TabPlaintextController(QTabWidget):
                         text = self.addAbstractText(workflow, text, key)
 
                 except Exception as e:
-                    print(e)
-                    textline = '** ' + self.textconstlist[11] + ' **'
+                    # print(e)
+                    #print(e)
+                    textline = '** ' + get_translation(babelFish, self.lankey, 'plain text const', 'Action Transcription Error') + ' **'
 
         except Exception as e:
-            print(e)
-            text = text + '** ' + self.textconstlist[12] + ' **'
+            # print(e)
+            #print(e)
+            text = text + '** ' + get_translation(babelFish, self.lankey, 'plain text const', 'Protocol List Transcription Error') + ' **'
         return text
 
     def addAbstractText(self, workflow, text, key):
@@ -2100,7 +2641,8 @@ class TabPlaintextController(QTabWidget):
             try:
                 param = babelFish[typeKey][param_en][self.lankey]['Name']
             except Exception as e:
-                print(e)
+                # print(e)
+                #print(e)
                 param = param_en
             val = str(workflow['Objects'][key]['Values'][ii])
             if val == '':
@@ -2182,7 +2724,7 @@ class TabPlaintextController(QTabWidget):
         elif len(keys) == 2:
             nounStr = self.getTranslatedNoun(
                 workflow['Objects'][keys[0]]['Name'])
-            nounStr += ' ' + self.textconstlist[14] + ' '
+            nounStr += ' ' + get_translation(babelFish, self.lankey, 'plain text const', 'and') + ' '
             nounStr += self.getTranslatedNoun(
                 workflow['Objects'][keys[1]]['Name'])
         elif len(keys) > 2:
@@ -2191,7 +2733,7 @@ class TabPlaintextController(QTabWidget):
                 nounStr += self.getTranslatedNoun(
                     workflow['Objects'][key]['Name'])
                 nounStr += ', '
-            nounStr += self.textconstlist[14] + ' '
+            nounStr += get_translation(babelFish, self.lankey, 'plain text const', 'and') + ' '
             nounStr += self.getTranslatedNoun(
                 workflow['Objects'][keys[-1]]['Name'])
         return nounStr
@@ -2201,9 +2743,68 @@ class TabPlaintextController(QTabWidget):
         try:
             noun_nat = self.itemDict[noun][self.lankey]['Name']
         except Exception as e:
-            print(e)
+            # print(e)
+            #print(e)
             noun_nat = noun
         return noun_nat
+
+    def errorFunc(self, a, b, c, type="Modify", error=False):
+        errorMsg = '**' + get_translation(babelFish, self.lankey, 'plain text const', 'Error') + '**'
+        return errorMsg
+
+    def defaultModFunc(self, a, b, c,):
+        steptext = self.tempActionName + " "
+        steptext += a
+        
+        if b != "":
+            steptext += " with "
+            steptext += b
+
+        if c != "":
+            steptext += " using "
+            steptext += c
+
+        return steptext
+
+    def defaultAddFunc(self, a, b, c):
+        steptext = self.tempActionName + " "
+        
+        if b == "":
+            steptext += "[Missing]"
+        else:
+            steptext += b
+        
+        steptext += " to "
+        if a == "":
+            steptext += "[Missing]"
+        else:
+            steptext += a
+
+        if c != "":
+            steptext += " using "
+            steptext += c
+
+        return steptext
+    
+    def defaultRemFunc(self, a, b, c):
+        steptext = self.tempActionName + " "
+        
+        if b == "":
+            steptext += "[Missing]"
+        else:
+            steptext += b
+            
+        if a == "":
+            steptext += "[Missing]"
+        else:
+            steptext += " from "
+            steptext += a
+            
+        if c != "":
+            steptext += " using "
+            steptext += c
+
+        return steptext
 
     def generateTextLine(self, workflow, key, priority):
         """
@@ -2245,31 +2846,38 @@ class TabPlaintextController(QTabWidget):
         itemB = self.getItemNouns(bKeys, workflow)
         itemC = self.getItemNouns(cKeys, workflow)
 
-        errorMsg = '**' + self.textconstlist[13] + '**'
-        def errorFunc(a, b, c): return errorMsg
-        try:
-            if actionParent == 'Add':
-                if numBIns == 0 or numAIns == 0:
-                    tempfunc = errorFunc
-                elif numBIns > 0 and numCIns == 0:
-                    tempfunc = self.actionDict[
-                        actionName][self.lankey]['Func']['00']
-                elif numBIns > 0 and numCIns > 0:
-                    tempfunc = self.actionDict[
-                        actionName][self.lankey]['Func']['01']
-    
-            if actionParent == 'Remove':
-                if numBIns == 0 or numAIns == 0:
-                    tempfunc = errorFunc
-                elif numBIns > 0 and numCIns == 0:
-                    tempfunc = self.actionDict[
-                        actionName][self.lankey]['Func']['00']
-                elif numBIns > 0 and numCIns > 0:
-                    tempfunc = self.actionDict[
-                        actionName][self.lankey]['Func']['01']
-    
-            if actionParent == 'Modify':
-                if numBIns == 0 and numCIns == 0:
+        if actionParent == 'Add':
+            if actionName not in self.actionDict.keys():
+                self.tempActionName = actionName
+                tempfunc = self.defaultAddFunc
+            elif numBIns == 0 or numAIns == 0:
+                tempfunc = self.errorFunc
+            elif numBIns > 0 and numCIns == 0:
+                tempfunc = self.actionDict[
+                    actionName][self.lankey]['Func']['00']
+            elif numBIns > 0 and numCIns > 0:
+                tempfunc = self.actionDict[
+                    actionName][self.lankey]['Func']['01']
+
+        if actionParent == 'Remove':
+            if actionName not in self.actionDict.keys():
+                self.tempActionName = actionName
+                tempfunc = self.defaultRemFunc
+            elif numBIns == 0 or numAIns == 0:
+                tempfunc = self.errorFunc
+            elif numBIns > 0 and numCIns == 0:
+                tempfunc = self.actionDict[
+                    actionName][self.lankey]['Func']['00']
+            elif numBIns > 0 and numCIns > 0:
+                tempfunc = self.actionDict[
+                    actionName][self.lankey]['Func']['01']
+
+        if actionParent == 'Modify':
+            try:
+                if actionName not in self.actionDict.keys():
+                    self.tempActionName = actionName
+                    tempfunc = self.defaultModFunc
+                elif numBIns == 0 and numCIns == 0:
                     tempfunc = self.actionDict[
                         actionName][self.lankey]['Func']['00']
                 elif numBIns > 0 and numCIns == 0:
@@ -2284,9 +2892,11 @@ class TabPlaintextController(QTabWidget):
                 else:  # Special case function handling
                     tempfunc = self.actionDict[
                         actionName][self.lankey]['Func']['S']
-        except Exception as e:
-            print(e)
-            tempfunc = errorFunc
+            except Exception as e:
+                # # print(e)
+                # tempfunc = errorFunc
+                #print(e)
+                tempfunc = self.errorFunc
 
         textline = tempfunc(itemA, itemB, itemC)
         return textline
@@ -2321,13 +2931,21 @@ class TabRawController(QTabWidget):
         """Update all data view tabs to current."""
         self.parent.subTabInd = index
         self.parent.updateCurrentTab()
-        self.parent.parent.updateToolBars()
+        # Ensure all file tabs are synchronized
+        self.parent.syncFileTabs()
+        # Update the base information tool with the current file's information
+        if hasattr(self.parent, 'rootwindow') and self.parent.rootwindow is not None:
+            self.parent.rootwindow.updateToolBars()
 
     def onClose(self, ind):
         """Remove closed tab from all data views."""
         self.parent.workflowTab.onClose(ind)
         self.removeTab(ind)
         self.parent.updateEntries()
+        # Ensure all tabs are synchronized after closing
+        # Ensure all tabs are synchronized after closing
+        if hasattr(self, 'parent') and self.parent is not None:
+            self.parent.syncFileTabs()
 
     def updateFromWorkflows(self, entriesWorkflow):
         """Update display data from all workflows."""
@@ -2396,7 +3014,11 @@ class TabWorkflowController(QTabWidget):
         """Update other data view tab indices with current tab index."""
         self.parent.subTabInd = index
         self.parent.updateCurrentTab()
-        self.parent.parent.updateToolBars()
+        # Ensure all file tabs are synchronized
+        self.parent.syncFileTabs()
+        # Update the base information tool with the current file's information
+        if hasattr(self, 'rootwindow') and self.rootwindow is not None:
+            self.rootwindow.updateToolBars()
 
     def tabNameUpdate(self, filename, tabInd):
         """
@@ -2415,7 +3037,7 @@ class TabWorkflowController(QTabWidget):
         self.setTabText(tabInd, tabname)
 
     def addNewTab(self, tabInd):
-        """Open a new tab after current tab and update other data views."""
+        """Open a new tab at the specified position and update other data views."""
         for ii in range(self.count()):
             # Do not open if current tab is empty and unnamed.
             cond1 = (self.widget(ii).scene().mainEntry['File'] == '')
@@ -2427,8 +3049,15 @@ class TabWorkflowController(QTabWidget):
         tabName = self.getNewTabName()
         workflowTab = ViewClass(
             parent=self, rootwindow=self.rootwindow, lankey=self.lankey)
-        self.insertTab(tabInd+1, workflowTab, tabName)
-        self.setCurrentIndex(tabInd+1)
+        self.insertTab(tabInd, workflowTab, tabName)
+        # Ensure the newly created tab is selected
+        self.setCurrentIndex(tabInd)
+        # Update toolbars to refresh experiment description box
+        if hasattr(self, 'rootwindow') and self.rootwindow is not None:
+            self.rootwindow.updateToolBars()
+        # Ensure all tabs are synchronized
+        if hasattr(self, 'parent') and self.parent is not None:
+            self.parent.syncFileTabs()
 
     def getNewTabName(self):
         """Return unique new tab name with duplicate modifier."""
@@ -2456,7 +3085,12 @@ class TabWorkflowController(QTabWidget):
                 parent=self, rootwindow=self.rootwindow, lankey=self.lankey)
             self.addTab(workflowTab, 'Untitled')
         self.parent.updateEntries()
-
+        # Update toolbars to refresh experiment description box
+        if hasattr(self, 'rootwindow') and self.rootwindow is not None:
+            self.rootwindow.updateToolBars()
+        # Ensure all tabs are synchronized after closing
+        if hasattr(self, 'parent') and self.parent is not None:
+            self.parent.syncFileTabs()
 
 class ViewClass(QGraphicsView):
     """Manages graphics scene for individual workflows."""
@@ -2485,6 +3119,8 @@ class ViewClass(QGraphicsView):
         self.center = [0, 0]
 
         self.setSceneRect(self.center[0], self.center[1], 1000, 500)
+
+        self.addNavLayout()
 
     def wheelEvent(self, event):
         """
@@ -2546,17 +3182,27 @@ class ViewClass(QGraphicsView):
         zoom_out_factor = 1 / zoom_in_factor
 
         if event.angleDelta().y() > 0:
-            if self.zoom_times == 15:
-                return
-            zoom_factor = zoom_in_factor
-            self.zoom_times += 1
+            self.zoomIn()
         else:
-            if self.zoom_times == -20:
-                return
-            zoom_factor = zoom_out_factor
-            self.zoom_times -= 1
-        self.scale(zoom_factor, zoom_factor)
+            self.zoomOut()
         self.setTransformationAnchor(QGraphicsView.NoAnchor)
+
+    def zoomIn(self):
+        zoom_in_factor = 1.1
+        if self.zoom_times == 15:
+                return
+        zoom_factor = zoom_in_factor
+        self.zoom_times += 1
+        self.scale(zoom_factor, zoom_factor)
+
+    def zoomOut(self):
+        zoom_in_factor = 1.1
+        zoom_out_factor = 1 / zoom_in_factor
+        if self.zoom_times == -20:
+                return
+        zoom_factor = zoom_out_factor
+        self.zoom_times -= 1
+        self.scale(zoom_factor, zoom_factor)
 
     def panstepEvt(self, event, direction, rate='slow'):
         """Pan graphics view at specified direction and step."""
@@ -2578,7 +3224,8 @@ class ViewClass(QGraphicsView):
             self.center[1] = self.center[1] + stepsize
 
         self.setSceneRect(self.center[0], self.center[1], 1000, 500)
-        event.accept()
+        if not isinstance(event, bool):
+            event.accept()
 
     def panYEvt(self, event, rate):
         """Pan graphics view horizontally at specified direction and rate."""
@@ -2614,6 +3261,108 @@ class ViewClass(QGraphicsView):
             self.setSceneRect(self.center[0], self.center[1], 1000, 500)
         event.accept()
 
+    def zoomFit(self):
+        self.setTransformationAnchor(QGraphicsView.NoAnchor)
+        window_size = self.size()
+        window_dims = [window_size.width(), window_size.height()]
+        
+        positions = []
+        for key in self.s.mainEntry['Objects']:
+            positions.append(self.s.mainEntry['Objects'][key]['position'])
+        positions = np.array(positions)
+        if len(positions) == 0:
+            self.center = [0, 0]
+        elif len(positions) == 1:
+            self.center = [positions[0][0] - 500, positions[0][1] - 250]
+        else:
+            x_min = min(positions[:,0])
+            x_max = max(positions[:,0])
+            y_min = min(positions[:,1])
+            y_max = max(positions[:,1])
+            width = x_max - x_min
+            height = y_max - y_min
+            self.center = [x_min + 0.5 * width - 500, y_min + 0.5 * height - 250]
+        self.setSceneRect(self.center[0], self.center[1], 1000, 500)
+
+
+        visible_rect = self.mapToScene(self.viewport().rect()).boundingRect()
+
+    def addNavLayout(self):
+        """Build the layout containing the workflow navigation buttons."""
+        self.navLayout = QHBoxLayout()
+        self.navLayout.addItem(QSpacerItem(
+            0, 0, QSizePolicy().Expanding, QSizePolicy().Minimum))
+
+        self.pan_up = QToolButton()
+        self.pan_up.setArrowType(Qt.UpArrow)
+        self.pan_up.clicked.connect(self.onPanUp)
+        self.navLayout.addWidget(self.pan_up)
+
+        self.pan_down = QToolButton()
+        self.pan_down.setArrowType(Qt.DownArrow)
+        self.pan_down.clicked.connect(self.onPanDown)
+        self.navLayout.addWidget(self.pan_down)
+        
+        self.pan_left = QToolButton()
+        self.pan_left.setArrowType(Qt.LeftArrow)
+        self.pan_left.clicked.connect(self.onPanLeft)
+        self.navLayout.addWidget(self.pan_left)
+        
+        self.pan_right = QToolButton()
+        self.pan_right.setArrowType(Qt.RightArrow)
+        self.pan_right.clicked.connect(self.onPanRight)
+        self.navLayout.addWidget(self.pan_right)
+
+        # TODO: Ugly!
+        self.zoom_in = QPushButton("+")
+        self.zoom_in.clicked.connect(self.onZoomIn)
+        self.navLayout.addWidget(self.zoom_in)
+        
+        # TODO: Ugly!
+        self.zoom_out = QPushButton("-")
+        self.zoom_out.clicked.connect(self.onZoomOut)
+        self.navLayout.addWidget(self.zoom_out)
+        
+        # TODO: Ugly!
+        self.zoom_fit = QPushButton("Center")
+        self.zoom_fit.clicked.connect(self.onZoomFit)
+        self.navLayout.addWidget(self.zoom_fit)
+
+        self.navVerLayout = QVBoxLayout()
+        self.navVerLayout.addItem(QSpacerItem(
+            0, 0, QSizePolicy().Minimum, QSizePolicy().Expanding))
+        self.navVerLayout.addLayout(self.navLayout)
+        self.setLayout(self.navVerLayout)
+
+    def onZoomIn(self, event):
+        self.onZoom(event, direction="in")
+
+    def onZoomOut(self, event):
+        self.onZoom(event, direction="out")
+
+    def onZoom(self, event, direction):
+        if direction == "in":
+            self.zoomIn()
+        elif direction == "out":
+            self.zoomOut()
+
+    def onZoomFit(self, event):
+        self.zoomFit()
+
+    def onPanUp(self, event):
+        self.onPan(event, direction="up")
+
+    def onPanDown(self, event):
+        self.onPan(event, direction="down")
+
+    def onPanLeft(self, event):
+        self.onPan(event, direction="left")
+
+    def onPanRight(self, event):
+        self.onPan(event, direction="right")
+
+    def onPan(self, event, direction):
+        self.panstepEvt(event=event, direction=direction, rate='slow')
 
 class SectionWindow(QWidget):
     """Manage pop-up workflow for opened sections."""
@@ -2629,40 +3378,50 @@ class SectionWindow(QWidget):
         self.rootwindow = rootwindow
         self.buildWidgets()
         self.prefillData()
+        
+        # Add Ctrl+S shortcut to save the workflow
+        self.saveShortcut = QShortcut(QKeySequence('Ctrl+S'), self)
+        self.saveShortcut.activated.connect(self.onSaveWorkflow)
 
     def buildWidgets(self):
         """Add data entry widgets and graphics scene to section window."""
         windowTitle = self.data['Name']
         if windowTitle == '':
-            windowTitle = '(Untitled)'
+            windowTitle = get_translation(babelFish, self.lankey, 'widgets', '(Untitled)')
         self.setWindowTitle(windowTitle)
         self.mainLayout = QHBoxLayout()
-        self.graphicView = ViewClass(
-            rootwindow=self.rootwindow, lankey=self.lankey)
-        self.mainLayout.addWidget(self.graphicView, QSizePolicy().Expanding)
+        self.addWorkflowWidget()
         self.addInfoWidget()
         self.setLayout(self.mainLayout)
+
+    def addWorkflowWidget(self):
+        """Add widget containing workflow and navigation tools."""
+        self.graphicView = ViewClass(
+            parent=self, rootwindow=self.rootwindow, lankey=self.lankey)
+        self.mainLayout.addWidget(self.graphicView, QSizePolicy().Expanding)
 
     def addInfoWidget(self):
         """Add name and description entry widgets."""
         self.infoLayout = QGridLayout()
 
-        namelabel = babelFish['ui'][self.lankey]['section'][0]
+        namelabel = get_translation(babelFish, self.lankey, 'section', 'Section Name:')
         self.nameLabel = QLabel(namelabel)
         self.infoLayout.addWidget(self.nameLabel, 0, 0)
 
         self.nameWidget = QLineEdit()
         self.nameWidget.setFixedWidth(200)
-        self.nameWidget.textChanged.connect(self.updateData)
+        # Don't connect textChanged to updateData to avoid overwriting data during typing
+        # self.nameWidget.textChanged.connect(self.updateData)
         self.infoLayout.addWidget(self.nameWidget, 1, 0)
 
-        desclabel = babelFish['ui'][self.lankey]['section'][1]
+        desclabel = get_translation(babelFish, self.lankey, 'section', 'Section Description:')
         self.descriptionLabel = QLabel(desclabel)
         self.infoLayout.addWidget(self.descriptionLabel, 2, 0)
 
         self.descriptionWidget = QTextEdit()
         self.descriptionWidget.setFixedWidth(200)
-        self.descriptionWidget.textChanged.connect(self.updateData)
+        # Don't connect textChanged to updateData to avoid overwriting data during typing
+        # self.descriptionWidget.textChanged.connect(self.updateData)
         self.infoLayout.addWidget(self.descriptionWidget, 3, 0)
 
         self.infoLayout.addItem(QSpacerItem(
@@ -2689,7 +3448,7 @@ class SectionWindow(QWidget):
         self.data['Description'] = self.descriptionWidget.toPlainText()
         windowTitle = self.data['Name']
         if windowTitle == '':
-            windowTitle = '(Untitled)'
+            windowTitle = get_translation(babelFish, self.lankey, 'widgets', '(Untitled)')
         self.setWindowTitle(windowTitle)
 
         self.item.textItem.changeText(self.data['Name'])
@@ -2697,12 +3456,20 @@ class SectionWindow(QWidget):
         self.item.parent.addBlocksEdgesFromData()
 
         self.windowSignal.emit(self.data)
+        
+    def onSaveWorkflow(self):
+        """Handle Ctrl+S shortcut to save the main workflow."""
+        # First update the section data
+        self.updateData()
+        # Then trigger the main window's save functionality
+        if hasattr(self.rootwindow, 'onSave'):
+            self.rootwindow.onSave()
 
 
 class SceneClass(QGraphicsScene):
     """Graphics display widget for individual workflows."""
 
-    grid = 30
+    grid = 120
 
     def __init__(self, parent=None, rootwindow=None, lankey='en'):
         QGraphicsScene.__init__(self, QRectF(0, 0, 1000, 500), parent)
@@ -2717,7 +3484,8 @@ class SceneClass(QGraphicsScene):
                           'Type': 'root',
                           'File': '',
                           'Description': '',
-                          'Objects': {}
+                          'Objects': {},
+                          'Format': 'uwl'
                           }
 
         self.objectKeys = []
@@ -2730,60 +3498,73 @@ class SceneClass(QGraphicsScene):
     def drawBackground(self, painter, rect):
         """Overwrite drawBackground operation for custom color."""
         painter.fillRect(rect, QColor(96, 98, 97))
+        lines = []
+        left = int(rect.left()) - int((rect.left()) % self.grid)
+        top = int(rect.top()) - int((rect.top()) % self.grid)
+        right = int(rect.right())
+        bottom = int(rect.bottom())
+        for x in range(left, right, self.grid):
+            lines.append(QLineF(x, top, x, bottom))
+        for y in range(top, bottom, self.grid):
+            lines.append(QLineF(left, y, right, y))
+        painter.setPen(QPen(QColor(130, 130, 130)))
+        painter.drawLines(lines)
 
     def contextMenuEvent(self, event):
         """Build and display context menu on right click."""
         lankey = self.rootwindow.lankey
-        labels = babelFish['ui'][lankey]['scene context']
 
         self.temppos = event.scenePos()
         menu = QMenu()
 
-        createActionBtn = menu.addAction(labels[0])
+        createActionBtn = menu.addAction(get_translation(babelFish, lankey, 'scene context', 'Create Action Block'))
         createActionBtn.setShortcut('Shift+D')
         createActionBtn.triggered.connect(self.onNewActionBlock)
 
-        createItemBtn = menu.addAction(labels[1])
+        createItemBtn = menu.addAction(get_translation(babelFish, lankey, 'scene context', 'Create Item Block'))
         createItemBtn.setShortcut('Shift+F')
         createItemBtn.triggered.connect(self.onNewItemBlock)
 
-        createSectionBtn = menu.addAction(labels[2])
+        createSectionBtn = menu.addAction(get_translation(babelFish, lankey, 'scene context', 'Create Section Block'))
         createSectionBtn.setShortcut('Shift+G')
         createSectionBtn.triggered.connect(self.onNewSection)
 
-        loadBtn = menu.addAction(labels[3])
+        loadBtn = menu.addAction(get_translation(babelFish, lankey, 'scene context', 'Insert from File'))
         loadBtn.setShortcut('Ctrl+I')
         loadBtn.triggered.connect(self.onLoadBlock)
 
-        loadBtn = menu.addAction(labels[4])
+        loadBtn = menu.addAction(get_translation(babelFish, lankey, 'scene context', 'Insert from File as Section'))
         loadBtn.setShortcut('Ctrl+Shift+I')
         loadBtn.triggered.connect(self.onLoadBlockasSection)
 
-        addAActionBtn = menu.addAction(labels[5])
+        addAActionBtn = menu.addAction(get_translation(babelFish, lankey, 'scene context', 'Add A-Type Connections'))
         addAActionBtn.setShortcut('Shift+1')
         addAActionBtn.triggered.connect(self.onAddAType)
 
-        addBActionBtn = menu.addAction(labels[6])
+        addBActionBtn = menu.addAction(get_translation(babelFish, lankey, 'scene context', 'Add B-Type Connections'))
         addBActionBtn.setShortcut('Shift+2')
         addBActionBtn.triggered.connect(self.onAddBType)
 
-        addCActionBtn = menu.addAction(labels[7])
+        addCActionBtn = menu.addAction(get_translation(babelFish, lankey, 'scene context', 'Add C-Type Connections'))
         addCActionBtn.setShortcut('Shift+3')
         addCActionBtn.triggered.connect(self.onAddCType)
 
-        copyBtn = menu.addAction(labels[8])
+        copyBtn = menu.addAction(get_translation(babelFish, lankey, 'scene context', 'Copy'))
         copyBtn.setShortcut('Ctrl+C')
         copyBtn.triggered.connect(self.onCopyBlock)
 
-        pasteBtn = menu.addAction(labels[9])
+        pasteBtn = menu.addAction(get_translation(babelFish, lankey, 'scene context', 'Paste'))
         pasteBtn.setShortcut('Ctrl+V')
         pasteBtn.triggered.connect(self.onPasteBlock)
 
-        selectBtn = menu.addAction(labels[10])
+        replaceBtn = menu.addAction("Replace block from file")
+        replaceBtn.triggered.connect(self.onReplaceBlock)
+
+        selectBtn = menu.addAction(get_translation(babelFish, lankey, 'scene context', 'Select All'))
         selectBtn.setShortcut('Ctrl+A')
         selectBtn.triggered.connect(self.onSelectAll)
 
-        delBtn = menu.addAction(labels[11])
+        delBtn = menu.addAction(get_translation(babelFish, lankey, 'scene context', 'Delete'))
         delBtn.triggered.connect(self.runElementDelete)
 
         emptyclipboard = {'ID': 'root',
@@ -2799,6 +3580,10 @@ class SceneClass(QGraphicsScene):
             addBActionBtn.setEnabled(False)
             addCActionBtn.setEnabled(False)
 
+        isOneBlock = self.checkIfOneBlockSelected()
+        if not isOneBlock:
+            replaceBtn.setEnabled(False)
+
         menu.exec_(event.screenPos())
 
     def keyPressEvent(self, event):
@@ -2808,6 +3593,7 @@ class SceneClass(QGraphicsScene):
         if event.key() == Qt.Key_Delete:
             self.runElementDelete()
             self.updateEntryEdges()
+            self.addBlocksEdgesFromData()
 
         elif event.key() == Qt.Key_Return:
             if len(self.selectedItems()) == 1:
@@ -2870,6 +3656,13 @@ class SceneClass(QGraphicsScene):
         else:
             return False
 
+    def checkIfOneBlockSelected(self):
+        """Return whether only one block is selected."""
+        if len(self.selectedItems()) == 1:
+            return True
+        else:
+            return False
+
     def onAddAType(self):
         """Add A-Type edge connection between valid selected blocks."""
         self.addEdgestoScene('A')
@@ -2881,6 +3674,8 @@ class SceneClass(QGraphicsScene):
     def onAddCType(self):
         """Add C-Type edge connection between valid selected blocks."""
         self.addEdgestoScene('C')
+
+
 
     def onNewActionBlock(self):
         """Launch empty action block data entry window."""
@@ -3166,7 +3961,6 @@ class SceneClass(QGraphicsScene):
                 if str(type(item)) == "<class '__main__.Edge'>":
                     self.deleteEdgeData(item)
                 self.removeItem(item)
-            self.addBlocksEdgesFromData()
 
     def deleteEdgeData(self, item):
         """Delete data of selected edge from workflow data."""
@@ -3182,7 +3976,6 @@ class SceneClass(QGraphicsScene):
 
     def transferWindowData(self, data):
         """Update block data in workflow on window close."""
-        # TODO: Double check function.
         self.newdata = data
         if self.newdata == []:
             return
@@ -3190,11 +3983,13 @@ class SceneClass(QGraphicsScene):
         self.blockdata = self.newdata
         entryID = self.blockdata['ID']
 
-        tempdata = self.blockdata.copy()
+        tempdata = copy.deepcopy(self.blockdata)
         self.mainEntry['Objects'][entryID] = tempdata
         self.addBlocksEdgesFromData()
         self.updateEdgeData()
         self.updateEntryEdges()
+
+
 
     def updateEntryEdges(self):
         """Update display edges from workflow data."""
@@ -3210,8 +4005,11 @@ class SceneClass(QGraphicsScene):
                 ID = item.data['ID']
                 self.mainEntry['Objects'][ID]['position'] = [
                     int(item.pos().x()), int(item.pos().y())]
-                item.data['position'] = [
-                    int(item.pos().x()), int(item.pos().y())]
+                # Only update position, preserve other data fields
+                if 'position' not in item.data:
+                    item.data['position'] = [0, 0]
+                item.data['position'][0] = int(item.pos().x())
+                item.data['position'][1] = int(item.pos().y())
 
                 if item.data['Type'] == 'Action':
                     workflow = copy.deepcopy(self.mainEntry)
@@ -3280,6 +4078,9 @@ class SceneClass(QGraphicsScene):
             .json file path for saved workflow.
 
         """
+        if not filename or filename.strip() == '':
+            raise ValueError("Cannot save with empty filename")
+            
         self.updateBlockPositionData()
         self.normalizeBlockPositions()
 
@@ -3287,6 +4088,7 @@ class SceneClass(QGraphicsScene):
         tabname = os.path.splitext(tabname)[0]
         self.mainEntry['Name'] = tabname
         self.mainEntry['File'] = filename
+        self.mainEntry['UWL Version'] = UWL_VERSION
         self.parent.parent.parent.updateEntries()
         savejson(self.mainEntry, filename)
         self.lastSaveEntry = copy.deepcopy(self.mainEntry)
@@ -3301,6 +4103,9 @@ class SceneClass(QGraphicsScene):
             .json file path for saved workflow.
 
         """
+        if not filename or filename.strip() == '':
+            raise ValueError("Cannot save with empty filename")
+            
         # TODO: How does this work differently from onSave?
         self.updateBlockPositionData()
         self.normalizeBlockPositions()
@@ -3309,6 +4114,7 @@ class SceneClass(QGraphicsScene):
         tabname = os.path.splitext(tabname)[0]
         self.mainEntry['Name'] = tabname
         self.mainEntry['File'] = filename
+        self.mainEntry['UWL Version'] = UWL_VERSION
         self.parent.parent.parent.updateEntries()
 
         savejson(self.mainEntry, filename)
@@ -3331,8 +4137,9 @@ class SceneClass(QGraphicsScene):
             is False.
 
         """
+        filter_string = "UWL Entry (*.uwl *.json);;UWL Template (*.uwlt)"
         filename = QFileDialog.getOpenFileName(
-            None, 'Import File', filter='*.json')
+            None, 'Import File', filter=filter_string)
 
         if filename[0] == '':
             return
@@ -3356,9 +4163,7 @@ class SceneClass(QGraphicsScene):
             if isBlock or isSection:
                 if item.isSelected():
                     clipboard['Objects'][item.data['ID']] = item.data
-        print(clipboard)
         clipboard = self.normalizeClipboard(clipboard)
-        print(clipboard)
         self.rootwindow.clipboard = copy.deepcopy(clipboard)
 
     def normalizeClipboard(self, clipboard):
@@ -3385,6 +4190,51 @@ class SceneClass(QGraphicsScene):
         importData = copy.deepcopy(self.rootwindow.clipboard)
         self.insertBlock(importData)
 
+    def onReplaceBlock(self):
+        """Replace selected block with block from file."""
+        selected = {'ID': 'root',
+                     'Objects': {}}
+        for item in self.items():
+            isBlock = (str(type(item)) ==
+                       "<class '__main__.Block.<locals>.BlockBase'>")
+            isSection = (str(type(item)) == "<class '__main__.Section'>")
+            if isBlock or isSection:
+                if item.isSelected():
+                    selected['Objects'][item.data['ID']] = item.data
+                    selected_item = item
+                    selected_item_ID = item.data['ID']
+
+        if len(selected['Objects']) > 1 or len(selected['Objects']) < 1:
+            print('Select only one block to replace.')
+            return
+        
+        selected_block = selected['Objects'][list(selected['Objects'].keys())[0]]
+
+        filter_string = "UWL Entry (*.uwl *.json);;UWL Template (*.uwlt)"
+        filename = QFileDialog.getOpenFileName(
+            None, 'Import File', filter=filter_string)
+
+        if filename[0] == '':
+            return
+        
+        importData = loadjson(filename[0])
+        if len(importData['Objects']) != 1 or selected_block["Type"] == "Section":
+            print('Select a file with only one block to replace.')
+            return
+
+        import_block = importData['Objects'][list(importData['Objects'].keys())[0]]
+        
+        if import_block['Type'] != selected_block['Type']:
+            print('Block types do not match.')
+            return
+        
+        replace_keys = ["Subtype", "Name", "Notes", "Parameters", "Values"]
+        for key in replace_keys:
+            selected_item.data[key] = import_block[key]
+            self.mainEntry['Objects'][selected_item_ID][key] = import_block[key]
+
+        self.addBlocksEdgesFromData()
+
     def insertBlockAsSection(self, importData):
         """
         Insert workflow data as a new section block.
@@ -3405,7 +4255,7 @@ class SceneClass(QGraphicsScene):
         nestedData = {'Objects': {'0': sectionData}}
         self.insertBlock(nestedData)
 
-    def insertBlock(self, importData):
+    def insertBlock(self, importData, del_existing=False):
         """
         Insert workflow data as loose blocks.
 
@@ -3414,10 +4264,16 @@ class SceneClass(QGraphicsScene):
         importData : dict
             Workflow data to be inserted as loose blocks.
 
+        del_existing : bool
+            If true, delete all items in importData that share a name with an
+            existing block in self.mainEntry and create an edge connected to
+            the existing block.
+
         """
         self.updateBlockPositionData()
         importData = self.updatePosFromMouse(importData)
 
+        importData = self.caseSwapDataObjectNames(importData)
 
         if self.mainEntry['Objects'] == {}:
             self.mainEntry['Objects'] = importData['Objects']
@@ -3425,6 +4281,9 @@ class SceneClass(QGraphicsScene):
         else:
             importData = self.removeDislocatedEdges(importData)
             importData, newKeys = self.replaceImportDataKeys(importData)
+            if del_existing:
+                importData = self.delwireExistingBlocks(importData)
+
             self.appendImportData(importData)
 
         self.addBlocksEdgesFromData()
@@ -3438,6 +4297,99 @@ class SceneClass(QGraphicsScene):
         #             item.setSelected(True)
         #         else:
         #             item.setSelected(False)
+
+    def delwireExistingBlocks(self, importData):
+        """
+        Delete and rewire all overlapping item blocks.
+        If an item block in import data shares a name with an item in
+        self.mainEntry, then delete that item from importData and rewire the
+        edge between the import action items and the item in self.mainEntry.
+
+        Parameters
+        ----------
+        importData : dict
+            Workflow data being imported into the main workflow.
+
+        Returns
+        -------
+        importData : dict
+            Workflow data with rewired action blocks and deleted item blocks.
+
+        """
+        action_keys = []
+        for key in importData['Objects'].keys():
+            if importData['Objects'][key]['Type'] == 'Action':
+                action_keys.append(key)
+        
+        temp_import = copy.deepcopy(importData)
+        for key in temp_import['Objects'].keys():
+            if temp_import['Objects'][key]['Type'] == 'Item':
+                import_name = temp_import['Objects'][key]['Name']
+                for main_key in self.mainEntry['Objects'].keys():
+                    main_name = self.mainEntry['Objects'][main_key]['Name']
+                    if import_name == main_name:
+                        del importData['Objects'][key]
+                        for edge_type in ['A In', 'B In', 'C In']:
+                            for action_key in action_keys:
+                                if key in importData[
+                                        'Objects'][action_key][edge_type]:
+                                    importData['Objects'][
+                                        action_key][edge_type].remove(key)
+                                    importData['Objects'][
+                                        action_key][edge_type].append(main_key)
+                        break
+        return copy.deepcopy(importData)
+
+    def caseSwapDataObjectNames(self, data):
+        """
+        Fix the capitolization for every object in a workflow if in dictionary.
+
+        Parameters
+        ----------
+        data : dict
+            Workflow data to case adjust.
+
+        Returns
+        -------
+        new_data : dict
+            Workflow with case adjusted data.
+
+        """
+        new_data = copy.deepcopy(data)
+        new_data = self.caseSwapDataObjectNamesbySection(data)
+        return new_data
+
+    def caseSwapDataObjectNamesbySection(self, section):
+        """
+        Fix object case for all objects in section.
+
+        Parameters
+        ----------
+        section : dict
+            Section workflow to case adjust.
+
+        Returns
+        -------
+        section : dict
+            Case adjust updated workflow.
+
+        """
+        for key in section['Objects'].keys():
+            block = section['Objects'][key]
+            if block['Type'] == 'Section':
+                block = self.caseSwapDataObjectNamesbySection(block)
+            else:
+                textfound = False
+                for name in babelFish[block['Type']].keys():
+                    if block['Name'].casefold() == name.casefold():
+                        textkey = name
+                        block['Name'] = babelFish[
+                            block['Type']][textkey][self.lankey]['Name']
+                        textfound = True
+                        break
+                if not textfound:
+                    continue
+        return section
 
     def updatePosFromMouse(self, data):
         """
@@ -3548,7 +4500,15 @@ class SceneClass(QGraphicsScene):
         openEntry = loadjson(filename)
         openEntry['language'] = self.lankey
         openEntry['File'] = filename
+        openEntry['Name'] = os.path.splitext(os.path.basename(filename))[0]
+        extension = os.path.splitext(filename)[-1]
+        if extension in [".json", ".uwl"]:
+            openEntry['Format'] = "uwl"
+        elif extension in [".uwlt"]:
+            openEntry['Format'] = "uwl_template"
         openEntry['Name'] = os.path.basename(filename)[:-4]
+
+        openEntry = self.caseSwapDataObjectNames(openEntry)
         self.mainEntry = openEntry
 
         self.lastSaveEntry = copy.deepcopy(self.mainEntry)
@@ -3897,8 +4857,17 @@ def Block(blockType='Action', rect=QRectF(-50, -50, 100, 100), parent=None,
                 text = babelFish[self.blockType][data['Name']
                                                  ][self.lankey]['Name']
             except Exception as e:
-                print(e)
-                text = str(data['Name'])
+                textfound = False
+                for name in babelFish[self.blockType].keys():
+                    if data['Name'].casefold() == name.casefold():
+                        textkey = name
+                        text = babelFish[
+                            self.blockType][textkey][self.lankey]['Name']
+                        textfound = True
+                        break
+                if not textfound:
+                    #print(e)
+                    text = str(data['Name'])
             return text
 
         def addEdge(self, edge):
@@ -4100,7 +5069,7 @@ class NewSectionWindow(QWidget):
     def __init__(self, parent, data=[], objectKeys=[], pos=[], lankey='en'):
         super().__init__()
 
-        self.setWindowTitle('New Section Info')
+        self.setWindowTitle(get_translation(babelFish, parent.rootwindow.lankey, 'widgets', 'New Section Info'))
 
         self.parent = parent
         self.pos = pos
@@ -4117,25 +5086,25 @@ class NewSectionWindow(QWidget):
         self.move(QCursor.pos().x()-100, QCursor.pos().y()-50)
 
         self.layout = QGridLayout()
-        namelabel = babelFish['ui'][self.lankey]['section'][0]
+        namelabel = get_translation(babelFish, self.lankey, 'section', 'Section Name:')
         self.layout.addWidget(QLabel(namelabel), 0, 0)
         self.nameWidget = QLineEdit()
         self.nameWidget.setMinimumWidth(200)
         self.layout.addWidget(self.nameWidget, 0, 1)
 
-        desclabel = babelFish['ui'][self.lankey]['section'][1]
+        desclabel = get_translation(babelFish, self.lankey, 'section', 'Section Description:')
         self.layout.addWidget(QLabel(desclabel), 1, 0)
         self.descriptionWidget = QTextEdit()
         self.descriptionWidget.setMinimumWidth(200)
         self.layout.addWidget(self.descriptionWidget, 1, 1)
 
-        addlabel = babelFish['ui'][self.lankey]['section'][2]
+        addlabel = get_translation(babelFish, self.lankey, 'section', 'Confirm')
         addBtn = QPushButton(addlabel)
         addBtn.setFixedWidth(120)
         addBtn.clicked.connect(self.onConfirm)
         self.layout.addWidget(addBtn, 2, 0)
 
-        cancellabel = babelFish['ui'][self.lankey]['section'][3]
+        cancellabel = get_translation(babelFish, self.lankey, 'section', 'Cancel')
         cancelBtn = QPushButton(cancellabel)
         cancelBtn.setFixedWidth(120)
         cancelBtn.clicked.connect(self.closeEvent)
@@ -4149,11 +5118,17 @@ class NewSectionWindow(QWidget):
 
         self.objectKeys = [round(float(ii)) for ii in self.objectKeys]
 
+        # Handle position - if pos is empty list, use default position
+        if isinstance(self.pos, list) and len(self.pos) == 0:
+            position = [0, 0]  # Default position when no mouse position available
+        else:
+            position = [int(self.pos.x()), int(self.pos.y())]
+
         self.data = {'Type': 'Section',
                      'Name': self.nameWidget.text(),
                      'Description': self.descriptionWidget.toPlainText(),
                      'Objects': {},
-                     'position': [int(self.pos.x()), int(self.pos.y())]}
+                     'position': position}
 
         if self.olddata == []:
             links = []
@@ -4187,7 +5162,6 @@ class NewBlockWindow(QWidget):
         super().__init__()
 
         self.lankey = parent.rootwindow.lankey
-        labellist = babelFish['ui'][self.lankey]['new block']
 
         self.confirmed = False
 
@@ -4213,27 +5187,27 @@ class NewBlockWindow(QWidget):
         self.layout = QGridLayout()
 
         if blockType == 'Action':
-            self.blockLabel = labellist[0]
+            self.blockLabel = get_translation(babelFish, self.lankey, 'widgets', 'New Action Block Entry')
         elif blockType == 'Item':
-            self.blockLabel = labellist[1]
+            self.blockLabel = get_translation(babelFish, self.lankey, 'widgets', 'New Item Block Entry')
 
         self.setWindowTitle(self.blockLabel)
 
-        self.layout.addWidget(QLabel(labellist[2]), 1, 0)
+        self.layout.addWidget(QLabel(get_translation(babelFish, self.lankey, 'new block', 'Block Class:')), 1, 0)
         if blockType == 'Action':
-            self.typeWidget = QLabel(labellist[18])
+            self.typeWidget = QLabel(get_translation(babelFish, self.lankey, 'new block', 'Action'))
         elif blockType == 'Item':
-            self.typeWidget = QLabel(labellist[19])
+            self.typeWidget = QLabel(get_translation(babelFish, self.lankey, 'new block', 'Item'))
 
         self.layout.addWidget(self.typeWidget, 1, 1)
 
-        self.layout.addWidget(QLabel(labellist[3]), 2, 0)
+        self.layout.addWidget(QLabel(get_translation(babelFish, self.lankey, 'new block', 'Block Sub-Class:')), 2, 0)
         self.subtypeWidget = QComboBox()
         self.subtypeWidget.addItems(self.subtypeChoices(blockType))
         self.subtypeWidget.currentIndexChanged.connect(self.onSubtypeChange)
         self.layout.addWidget(self.subtypeWidget, 2, 1)
 
-        self.layout.addWidget(QLabel(labellist[4]), 3, 0)
+        self.layout.addWidget(QLabel(get_translation(babelFish, self.lankey, 'new block', 'Name:')), 3, 0)
         self.nameWidget = autocompleteLineEdit()
         self.nameWidget.clicked.connect(self.onNameClick)
         if self.nameWidget.text() == '':
@@ -4242,7 +5216,7 @@ class NewBlockWindow(QWidget):
         self.layout.addWidget(self.nameWidget, 3, 1)
         self.setNameCompleter()
 
-        self.linkLabel = QLabel(labellist[5])
+        self.linkLabel = QLabel(get_translation(babelFish, self.lankey, 'new block', 'Linked Item:'))
         self.layout.addWidget(self.linkLabel, 4, 0)
         self.linkWidget = QCheckBox()
         self.linkWidget.stateChanged.connect(self.onLinkBoxClick)
@@ -4251,7 +5225,7 @@ class NewBlockWindow(QWidget):
             self.linkLabel.hide()
             self.linkWidget.hide()
 
-        self.linkIDLabel = QLabel(labellist[6])
+        self.linkIDLabel = QLabel(get_translation(babelFish, self.lankey, 'new block', 'Link ID:'))
         self.layout.addWidget(self.linkIDLabel, 5, 0)
         self.linkIDWidget = autocompleteLineEdit()
         self.linkIDWidget.clicked.connect(self.onLinkClick)
@@ -4265,8 +5239,8 @@ class NewBlockWindow(QWidget):
             self.linkIDWidget.hide()
         self.setLinkCompleter()
 
-        self.layout.addWidget(QLabel(labellist[7]), 6, 0)
-        self.layout.addWidget(QLabel(labellist[8]), 6, 1)
+        self.layout.addWidget(QLabel(get_translation(babelFish, self.lankey, 'new block', 'Parameters')), 6, 0)
+        self.layout.addWidget(QLabel(get_translation(babelFish, self.lankey, 'new block', 'Values')), 6, 1)
 
         self.paramWidgets = []
         self.paramWidgets.append(autocompleteLineEdit())
@@ -4283,22 +5257,22 @@ class NewBlockWindow(QWidget):
 
         self.layout.addLayout(self.valuelayout, 7, 1)
 
-        addParamBtn = QPushButton(labellist[9])
+        addParamBtn = QPushButton(get_translation(babelFish, self.lankey, 'new block', '+ Add Parameter'))
         addParamBtn.setFixedWidth(150)
         addParamBtn.clicked.connect(self.onParamAdd)
 
         self.layout.addWidget(addParamBtn, 8, 0)
 
-        self.layout.addWidget(QLabel(labellist[10]), 9, 0)
+        self.layout.addWidget(QLabel(get_translation(babelFish, self.lankey, 'new block', 'Notes:')), 9, 0)
         self.notes = QTextEdit()
         self.layout.addWidget(self.notes, 9, 1)
 
-        addBtn = QPushButton(labellist[11])
+        addBtn = QPushButton(get_translation(babelFish, self.lankey, 'new block', 'Confirm'))
         addBtn.setFixedWidth(120)
         addBtn.clicked.connect(self.onConfirm)
         self.layout.addWidget(addBtn, 10, 0)
 
-        cancelBtn = QPushButton(labellist[12])
+        cancelBtn = QPushButton(get_translation(babelFish, self.lankey, 'new block', 'Cancel'))
         cancelBtn.setFixedWidth(120)
         cancelBtn.clicked.connect(self.closeEvent)
         self.layout.addWidget(cancelBtn, 10, 1)
@@ -4332,6 +5306,8 @@ class NewBlockWindow(QWidget):
         self.nameCompleteList = self.getNameCompleteList(
             parentType, parentClass)
         self.nameCompleter = QCompleter(self.nameCompleteList)
+        self.nameCompleter.setCaseSensitivity(
+            Qt.CaseSensitivity.CaseInsensitive)
         self.nameCompleter.setModelSorting(QCompleter.UnsortedModel)
         self.nameWidget.setCompleter(self.nameCompleter)
 
@@ -4345,6 +5321,8 @@ class NewBlockWindow(QWidget):
         self.paramCompleteList = self.getParamCompleteList(
             self.blockType, parentClass)
         self.paramCompleter = QCompleter(self.paramCompleteList)
+        self.paramCompleter.setCaseSensitivity(
+            Qt.CaseSensitivity.CaseInsensitive)
         self.paramCompleter.setModelSorting(QCompleter.UnsortedModel)
         for widget in self.paramWidgets:
             widget.setCompleter(self.paramCompleter)
@@ -4352,6 +5330,8 @@ class NewBlockWindow(QWidget):
     def setLinkCompleter(self):
         """Generate link ID completer list and link to link completer."""
         self.linkCompleter = QCompleter(self.linkIDs)
+        self.linkCompleter.setCaseSensitivity(
+            Qt.CaseSensitivity.CaseInsensitive)
         self.linkCompleter.setCaseSensitivity(Qt.CaseInsensitive)
         self.linkCompleter.setModelSorting(
             QCompleter.CaseInsensitivelySortedModel)
@@ -4406,17 +5386,15 @@ class NewBlockWindow(QWidget):
 
     def launchLinkOverwriteMsg(self):
         """Prompt warning message for overwriting current with link data."""
-        labellist = babelFish['ui'][self.lankey]['new block']
-
         self.msgOpen = True
         self.msg = QMessageBox()
-        msgtxt = labellist[13] + ' '
-        msgtxt += labellist[14] + '\n'
-        msgtxt += labellist[15]
+        msgtxt = get_translation(babelFish, self.lankey, 'new block', 'The data in this block will be linked to the selected link ID.') + ' '
+        msgtxt += get_translation(babelFish, self.lankey, 'new block', 'All other data in this block will be overwritten.\n') + '\n'
+        msgtxt += get_translation(babelFish, self.lankey, 'new block', 'Would you like to continue?')
         self.msg.setText(msgtxt)
-        yesBtn = self.msg.addButton(labellist[16], QMessageBox.YesRole)
+        yesBtn = self.msg.addButton(get_translation(babelFish, self.lankey, 'new block', 'Yes'), QMessageBox.YesRole)
         yesBtn.clicked.connect(self.onMsgYes)
-        noBtn = self.msg.addButton(labellist[17], QMessageBox.NoRole)
+        noBtn = self.msg.addButton(get_translation(babelFish, self.lankey, 'new block', 'No'), QMessageBox.NoRole)
         noBtn.clicked.connect(self.onMsgNo)
         self.msg.exec()
         self.msgOpen = False
@@ -4582,13 +5560,16 @@ class NewBlockWindow(QWidget):
             block['Name'] = self.completeList_en[ind_en]
         else:
             try:
-                # https://stackoverflow.com/questions/15421363/find-the-index-of-a-string-ignoring-cases
+                ind_en = next(ii for ii, item in enumerate(
+                            self.completeList) if item.lower(
+                                ) == self.nameWidget.text())
                 ind_en = next(ii for ii, item in enumerate(
                             self.completeList) if item.lower(
                                 ) == self.nameWidget.text())
                 block['Name'] = self.completeList_en[ind_en]
             except Exception as e:
-                print(e)
+                # print(e)
+                #print(e)
                 block['Name'] = self.nameWidget.text()
 
         block['Notes'] = self.notes.toPlainText()
@@ -4619,7 +5600,8 @@ class NewBlockWindow(QWidget):
                     param_ind = paramList.index(self.paramWidgets[ii].text())
                     param_en = paramList_en[param_ind]
                 except Exception as e:
-                    print(e)
+                    # print(e)
+                    #print(e)
                     param_en = self.paramWidgets[ii].text()
                 block['Parameters'].append(param_en)
                 block['Values'].append(self.valueWidgets[ii].text())
@@ -4638,12 +5620,11 @@ class NewBlockWindow(QWidget):
 
     def prefillData(self, data):
         """Fill prompt window fields with data if modifiying existing block."""
-        labellist = babelFish['ui'][self.lankey]['new block']
         if data != []:
             if self.blockType == 'Action':
-                self.typeWidget.setText(labellist[18])
+                self.typeWidget.setText(get_translation(babelFish, self.lankey, 'new block', 'Action'))
             elif self.blockType == 'Item':
-                self.typeWidget.setText(labellist[19])
+                self.typeWidget.setText(get_translation(babelFish, self.lankey, 'new block', 'Item'))
 
             subtypeLbl = babelFish[self.blockType][data['Subtype']
                                                    ][self.lankey]['Name']
@@ -4653,7 +5634,7 @@ class NewBlockWindow(QWidget):
                 nameLbl = babelFish[self.blockType][data['Name']
                                                     ][self.lankey]['Name']
             except Exception as e:
-                print(e)
+                # print(e)
                 nameLbl = data['Name']
 
             self.nameWidget.setText(nameLbl)
@@ -4674,12 +5655,1387 @@ class NewBlockWindow(QWidget):
                         typeKey][paramName_en][self.lankey]['Name']
                     self.paramWidgets[ii].insert(paramName)
                 except Exception as e:
-                    print(e)
+                    # print(e)
                     self.paramWidgets[ii].insert(data['Parameters'][ii])
 
                 self.valueWidgets[ii].insert(data['Values'][ii])
                 self.onParamAdd()
 
+class ExperimentDesignWindow(QWidget):
+    windowSignal = Signal(object)
+    def __init__(self, lankey='en'):
+        super().__init__()
+        
+        self.lankey = lankey
+        self.layout = QVBoxLayout()
+        
+        self.setWindowModality(Qt.ApplicationModal)
+        self.file_path = ""
+        self.confirmed = False
+        self.paramList = []
+        
+        self.addDesignTypeWidgets()
+        self.addRootFileWidgets()
+        self.addRootNameWidgets()
+        self.addParametersWidgets()
+        self.addConfirmWidgets()
+        
+        self.layout.addItem(QSpacerItem(0, 0,
+                                        QSizePolicy.Minimum,
+                                        QSizePolicy.Expanding))
+        self.setLayout(self.layout)
+
+    def spacer(self, method="min"):
+        if method == "min":
+            spacer = QSpacerItem(20, 0, QSizePolicy.Minimum, QSizePolicy.Minimum)
+        elif method == "hor-exp":
+            spacer = QSpacerItem(0, 0, QSizePolicy.Expanding, QSizePolicy.Minimum)
+        return spacer
+
+    def addDesignTypeWidgets(self):
+        self.layoutDesignType = QHBoxLayout()
+        self.layoutDesignType.addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Design Method:')))
+        
+        self.designTypeWidget = QComboBox()
+        design_methods = [
+            get_translation(babelFish, self.lankey, 'widgets', 'Random'),
+            get_translation(babelFish, self.lankey, 'widgets', 'Grid'),
+            get_translation(babelFish, self.lankey, 'widgets', 'Latin Hypercube'),
+            get_translation(babelFish, self.lankey, 'widgets', 'Minimax')
+        ]
+        self.designTypeWidget.addItems(design_methods)
+        self.layoutDesignType.addWidget(self.designTypeWidget)
+        self.designTypeWidget.currentIndexChanged.connect(
+            self.updateParamWidgets)
+        
+        self.layoutDesignType.addItem(self.spacer("hor-exp"))
+        
+        self.layout.addLayout(self.layoutDesignType)
+        
+        
+    def addRootFileWidgets(self):
+        self.layoutRootFile = QHBoxLayout()
+        self.layoutRootFile.addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Root UWL:')))
+
+        self.filepathIndicatorWidget = QLabel(get_translation(babelFish, self.lankey, 'widgets', '** Select File to View Parameters **'))
+        self.layoutRootFile.addWidget(self.filepathIndicatorWidget)
+        
+        self.browseRootFileWidget = QPushButton(get_translation(babelFish, self.lankey, 'widgets', 'Browse'))
+        self.browseRootFileWidget.clicked.connect(self.open_file_browser)
+        self.layoutRootFile.addWidget(self.browseRootFileWidget)
+        
+        self.layoutRootFile.addItem(self.spacer("hor-exp"))
+        
+        self.layout.addLayout(self.layoutRootFile)
+
+    def addRootNameWidgets(self):
+        self.layoutRootName = QHBoxLayout()
+        self.layoutRootName.addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Root File Name:')))
+        
+        self.rootNameWidget = QLineEdit()
+        self.rootNameWidget.editingFinished.connect(self.updateParamWidgets)
+        self.updateRootNameWidget()
+            
+        self.layoutRootName.addWidget(self.rootNameWidget)
+        self.layoutRootFile.addItem(self.spacer("hor-exp"))
+
+        self.layoutRootName.addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Number of New Experiments:')))
+
+        self.numExpWidget = QLineEdit()
+        self.numExpWidget.setValidator(QIntValidator(0, 999999))
+        self.numExpWidget.editingFinished.connect(self.updateParamWidgets)
+        self.numExpWidget.setMaximumWidth(100)
+        self.layoutRootName.addWidget(self.numExpWidget)
+        self.layoutRootFile.addItem(self.spacer("hor-exp"))
+
+        self.layout.addLayout(self.layoutRootName)
+    
+    def updateRootNameWidget(self):
+        if self.file_path == "":
+            self.rootNameWidget.setText(get_translation(babelFish, self.lankey, 'widgets', 'Experiment_#'))
+        else:
+            fname = os.path.basename(self.file_path)
+            self.rootNameWidget.setText(f"{os.path.splitext(fname)[0]}_#")
+    
+    def open_file_browser(self):
+        # Open a file dialog and get the selected file path
+        filter_string = get_translation(babelFish, self.lankey, 'widgets', 'UWL Entry (*.uwl *.json);;UWL Template (*.uwlt)')
+        temp_file_path, _ = QFileDialog.getOpenFileName(self, get_translation(babelFish, self.lankey, 'widgets', 'Open File'), "", filter_string)
+        
+        if temp_file_path != "" and temp_file_path != self.file_path:
+            self.file_path = temp_file_path
+            self.filepathIndicatorWidget.setText(self.file_path)
+            self.updateRootNameWidget()
+            self.getParameterList()
+            self.updateParamWidgets()
+            self.updateDesignData()
+
+    def getParameterList(self):
+        workflow = loadjson(self.file_path)
+        
+        paramListObj = TabViewController()
+        paramListObj.entrynames, paramListObj.tableNames = [], []
+        paramListObj.addSectionTableNames(workflow, keyPath=[])
+        
+        self.keyPathLists = paramListObj.keyPathLists
+        self.paramList = paramListObj.tableNames
+       
+    def addParametersWidgets(self):
+        self.init_param_dict = {"parameter": "",
+                                "dtype": "Numerical-Continuous",
+                                "units": "",
+                                "disc_levels": 3,
+                                "min_bnd": -100,
+                                "max_bnd": 100,
+                                "categories": ["", ""],
+                                "scale": "Linear",
+                                "levels": 5
+                                }
+        self.designData = [self.init_param_dict.copy()]
+        
+        self.designType = "Random"
+        
+        self.paramLayout = QGridLayout()
+        self.updateParamWidgets()
+        self.layout.addLayout(self.paramLayout)
+        
+    def updateParamWidgets(self):
+        self.clear_grid_layout()
+        self.init_designWidgets()
+        
+        self.designType = self.designTypeWidget.currentText()
+        self.designNumExp = self.numExpWidget.text()
+        self.designRootName = self.rootNameWidget.text()
+
+        self.updateNumberExperiments()
+        self.updateBounds()
+
+        max_row = 0
+        self.paramLayouts = []
+        for row_ind, paramDataRow in enumerate(self.designData):
+            self.addParamRowWidget(row_ind, paramDataRow)
+            max_row = row_ind
+        
+        if not max_row >= (len(self.paramList) -1):
+            self.addRowBtn = QPushButton(get_translation(babelFish, self.lankey, 'widgets', '+ Add Parameter'))
+            self.addRowBtn.setFixedWidth(400)
+            self.addRowBtn.clicked.connect(self.onAddRow)
+            self.paramLayout.addWidget(self.addRowBtn, max_row + 1, 1)
+            self.paramLayout.addItem(self.spacer("hor-exp"), max_row + 1, 2)
+
+    def updateNumberExperiments(self):
+        if self.numExpWidget.text() == "":
+            self.numExpWidget.setText("1")
+            numExp = 1
+        else:
+            numExp = int(self.numExpWidget.text())
+
+        if self.designType in ["Random"]:
+            if numExp < 1:
+                numExp = 1
+        elif self.designType in ["Grid"]:
+            numExp = self.getNumExp_Grid()
+        elif self.designType in ["Latin Hypercube", "Minimax"]:
+            numExp = self.getNumExp_LatinHypercube()
+
+        self.numExpWidget.setText(str(numExp))
+        self.numExp = numExp
+
+    def updateBounds(self):
+        for row_ind, paramDataRow in enumerate(self.designData):
+            if paramDataRow["dtype"] in ["Numerical-Integer",
+                                         "Numerical-Continuous",
+                                         "Numerical-Discrete"]:
+                if paramDataRow["scale"] == "Log":
+                    for key in ["min_bnd", "max_bnd"]:
+                        if float(paramDataRow[key]) < 0:
+                            self.designData[row_ind][key] = 0.1
+                
+                if float(paramDataRow["min_bnd"]) > float(paramDataRow["max_bnd"]):
+                     min_val = str(float(paramDataRow["min_bnd"]))
+                     max_val = str(float(paramDataRow["max_bnd"]))
+                     self.designData[row_ind]["min_bnd"] = max_val
+                     self.designData[row_ind]["max_bnd"] = min_val
+
+                if float(paramDataRow["min_bnd"]) == float(paramDataRow["max_bnd"]):
+                     self.designData[row_ind]["max_bnd"] = str(float(paramDataRow["min_bnd"]) + 1)
+
+    def getNumExp_Grid(self):
+        numExp = 1
+        for param in self.designData:
+            if param["dtype"] in ["Numerical-Integer", "Numerical-Continuous"]:
+                numExp = numExp * int(param["levels"])
+            elif param["dtype"] in ["Numerical-Discrete"]:
+                numExp = numExp * int(param["disc_levels"])
+            elif param["dtype"] in ["Categorical"]:
+                numExp = numExp * len(param["categories"])
+        return numExp
+
+    def getNumExp_LatinHypercube(self):
+        numExp = 1
+        for param in self.designData:
+            if param["dtype"] in ["Numerical-Integer", "Numerical-Continuous"]:
+                numExp = max([numExp, 2])
+            elif param["dtype"] in ["Numerical-Discrete"]:
+                numExp = max([numExp, int(param["disc_levels"])])
+            elif param["dtype"] in ["Categorical"]:
+                numExp = max([numExp, len(param["categories"])])
+        numExp = max([numExp, int(self.numExpWidget.text())])
+        return numExp
+
+    def init_designWidgets(self):
+        self.designWidgets = []
+        for row in self.designData:
+            self.designWidgets.append({})
+            
+    def addParamRowWidget(self, row_ind, paramRow):
+        delRowBtn = QPushButton(get_translation(babelFish, self.lankey, 'widgets', 'x'))
+        delRowBtn.setMaximumWidth(30)
+        delRowBtn.clicked.connect(self.onRowDelete)
+        self.paramLayout.addWidget(delRowBtn, row_ind, 0)
+        self.addParamWidget(row_ind, paramRow)
+        
+    def addParamWidget(self, row_ind, paramRow):
+        self.paramLayouts.append(QHBoxLayout())
+        self.addParam_parameter(row_ind, paramRow)
+        
+        self.addParam_dtype(row_ind, paramRow)
+        self.addParam_units(row_ind, paramRow)
+        
+        if paramRow["dtype"] in ["Numerical-Continuous",
+                                 "Numerical-Discrete",
+                                 "Numerical-Integer"]:
+            self.addParam_scale(row_ind, paramRow)
+            self.addParam_minmax(row_ind, paramRow)
+        
+        if paramRow['dtype'] == "Numerical-Discrete":
+            self.addParam_discLevels(row_ind, paramRow)
+            
+        if self.designType in ["Grid"]:
+            if paramRow['dtype'] in ["Numerical-Continuous",
+                                     "Numerical-Integer"]:
+                self.addParam_levels(row_ind, paramRow)
+            
+        if paramRow["dtype"] == "Categorical":
+            self.addParam_categories(row_ind, paramRow)
+        
+        self.paramLayouts[row_ind].addItem(self.spacer("hor-exp"))
+        self.connectParamLayoutWidgets_updateDesignonChange()
+        self.paramLayout.addLayout(self.paramLayouts[row_ind], row_ind, 1)
+    
+    def connectParamLayoutWidgets_updateDesignonChange(self):
+        for ii in range(len(self.designWidgets)):
+            for key in self.designWidgets[ii].keys():
+                if isinstance(self.designWidgets[ii][key], QComboBox):
+                    self.designWidgets[ii][key].currentIndexChanged.connect(
+                        self.onWidgetChange)
+                elif isinstance(self.designWidgets[ii][key], QLineEdit):
+                    self.designWidgets[ii][key].editingFinished.connect(
+                        self.onWidgetChange)
+                elif key == "categories":
+                    for jj in range(self.designWidgets[ii][key].count()):
+                        widget = self.designWidgets[ii][key].itemAt(
+                            jj).widget()
+                        if isinstance(widget, QLineEdit):
+                            widget.editingFinished.connect(self.onWidgetChange)
+        
+    def onWidgetChange(self):
+        self.updateDesignData()                    
+        self.updateParamWidgets()
+    
+    def updateDesignData(self):
+        for ii in range(len(self.designWidgets)):
+            for key in self.designWidgets[ii].keys():
+                if isinstance(self.designWidgets[ii][key], QComboBox):
+                    self.designData[ii][key] = self.designWidgets[
+                        ii][key].currentText()
+                elif isinstance(self.designWidgets[ii][key], QLineEdit):
+                    self.designData[ii][key] = self.designWidgets[
+                        ii][key].text()
+                elif key == "categories":
+                    cat_list = []
+                    for jj in range(self.designWidgets[ii][key].count()):
+                        widget = self.designWidgets[ii][key].itemAt(
+                            jj).widget()
+                        if isinstance(widget, QLineEdit):
+                            cat_list.append(widget.text())
+                    self.designData[ii][key] = cat_list
+
+    def addParam_parameter(self, row_ind, paramRow):
+        self.paramLayouts[row_ind].addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Parameter:')))
+        self.designWidgets[row_ind]["parameter"] = QComboBox()
+        
+        self.designWidgets[row_ind]["parameter"].addItems(self.paramList)
+        self.paramLayouts[row_ind].addWidget(
+            self.designWidgets[row_ind]["parameter"])
+
+        used_params = [self.designData[ii]["parameter"] for ii in range(len(self.designData))]
+
+        if used_params[0] != "" and self.designData[row_ind]["parameter"] == "":
+            param_ind = 0
+            while self.paramList[param_ind] in used_params:
+                param_ind += 1
+            
+            self.designData[row_ind]["parameter"] = self.paramList[param_ind]
+
+        self.designWidgets[row_ind]["parameter"].setCurrentText(
+            self.designData[row_ind]["parameter"])
+        self.paramLayouts[row_ind].addItem(self.spacer())
+        
+    def addParam_dtype(self, row_ind, paramRow):
+        self.paramLayouts[row_ind].addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Data Type:')))
+        self.designWidgets[row_ind]["dtype"] = QComboBox()
+        self.designWidgets[row_ind]["dtype"].addItems([get_translation(babelFish, self.lankey, 'widgets', 'Numerical-Continuous'),
+                                                       get_translation(babelFish, self.lankey, 'widgets', 'Numerical-Integer'),
+                                                       get_translation(babelFish, self.lankey, 'widgets', 'Numerical-Discrete'),
+                                                       get_translation(babelFish, self.lankey, 'widgets', 'Categorical')])
+        self.paramLayouts[row_ind].addWidget(
+            self.designWidgets[row_ind]["dtype"])
+        self.designWidgets[row_ind]["dtype"].setCurrentText(
+            self.designData[row_ind]["dtype"])
+        
+        self.paramLayouts[row_ind].addItem(self.spacer())
+    
+    def addParam_scale(self, row_ind, paramRow):
+        self.paramLayouts[row_ind].addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Scale:')))
+        self.designWidgets[row_ind]["scale"] = QComboBox()
+        self.designWidgets[row_ind]["scale"].addItems([get_translation(babelFish, self.lankey, 'widgets', 'Linear'), get_translation(babelFish, self.lankey, 'widgets', 'Log')])
+        self.paramLayouts[row_ind].addWidget(
+            self.designWidgets[row_ind]["scale"])
+        self.designWidgets[row_ind]["scale"].setCurrentText(
+            self.designData[row_ind]["scale"])
+        self.paramLayouts[row_ind].addItem(self.spacer())
+
+    def addParam_units(self, row_ind, paramRow):
+        self.paramLayouts[row_ind].addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Units (optional):')))
+        self.designWidgets[row_ind]["units"] = QLineEdit()
+        self.paramLayouts[row_ind].addWidget(self.designWidgets[row_ind]["units"])
+        self.designWidgets[row_ind]["units"].setText(
+            str(self.designData[row_ind]["units"]))
+        
+        self.paramLayouts[row_ind].addItem(self.spacer())
+
+    def addParam_minmax(self, row_ind, paramRow):
+        self.paramLayouts[row_ind].addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Min Bound:')))
+        self.designWidgets[row_ind]["min_bnd"] = QLineEdit()
+        if self.designData[row_ind]["dtype"] in ["Numerical-Continuous",
+                                                 "Numerical-Discrete"]:
+            self.designWidgets[row_ind]["min_bnd"].setValidator(
+                QDoubleValidator(-float('inf'), float('inf'), 99)) 
+        elif self.designData[row_ind]["dtype"] == "Numerical-Integer":
+            self.designWidgets[row_ind]["min_bnd"].setValidator(
+                QIntValidator())
+        self.paramLayouts[row_ind].addWidget(
+            self.designWidgets[row_ind]["min_bnd"])
+        self.designWidgets[row_ind]["min_bnd"].setText(
+            str(self.designData[row_ind]["min_bnd"]))
+        
+        self.paramLayouts[row_ind].addItem(self.spacer())
+        
+        self.paramLayouts[row_ind].addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Max Bound:')))
+        self.designWidgets[row_ind]["max_bnd"] = QLineEdit()
+        if self.designData[row_ind]["dtype"] in ["Numerical-Continuous",
+                                                 "Numerical-Discrete"]:
+            self.designWidgets[row_ind]["max_bnd"].setValidator(
+                QDoubleValidator(-float('inf'), float('inf'), 99)) 
+        elif self.designData[row_ind]["dtype"] == "Numerical-Integer":
+            self.designWidgets[row_ind]["max_bnd"].setValidator(
+                QIntValidator())  
+        self.paramLayouts[row_ind].addWidget(
+            self.designWidgets[row_ind]["max_bnd"])
+        self.designWidgets[row_ind]["max_bnd"].setText(
+            str(self.designData[row_ind]["max_bnd"]))
+        
+        self.paramLayouts[row_ind].addItem(self.spacer())
+        
+    def addParam_discLevels(self, row_ind, paramRow):
+        self.paramLayouts[row_ind].addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Discrete Levels:')))
+        self.designWidgets[row_ind]["disc_levels"] = QLineEdit()
+        self.designWidgets[row_ind]["disc_levels"].setValidator(
+            QIntValidator(0, 999999)) 
+        self.paramLayouts[row_ind].addWidget(
+            self.designWidgets[row_ind]["disc_levels"])
+        self.designWidgets[row_ind]["disc_levels"].setText(
+            str(self.designData[row_ind]["disc_levels"]))
+        
+        self.paramLayouts[row_ind].addItem(self.spacer())
+
+    def addParam_levels(self, row_ind, paramRow):
+        self.paramLayouts[row_ind].addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Levels:')))
+        self.designWidgets[row_ind]["levels"] = QLineEdit()
+        self.designWidgets[row_ind]["levels"].setValidator(
+            QIntValidator(0, 999999)) 
+        self.paramLayouts[row_ind].addWidget(
+            self.designWidgets[row_ind]["levels"])
+        self.designWidgets[row_ind]["levels"].setText(
+            str(self.designData[row_ind]["levels"]))
+        
+        self.paramLayouts[row_ind].addItem(self.spacer())
+        
+    def addParam_categories(self, row_ind, paramRow):
+        self.paramLayouts[row_ind].addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Categories:')))
+        self.designWidgets[row_ind]["categories"] = QHBoxLayout()
+        for cat in self.designData[row_ind]["categories"]:
+            lineedit = QLineEdit(cat)
+            self.designWidgets[row_ind]["categories"].addWidget(lineedit)
+            
+        self.paramLayouts[row_ind].addLayout(
+            self.designWidgets[row_ind]["categories"])
+        
+        self.addCategoryBtn = QPushButton(get_translation(babelFish, self.lankey, 'widgets', '+ Add Category'))
+        self.addCategoryBtn.row_ind = row_ind
+        self.addCategoryBtn.clicked.connect(self.onAddCategory)
+        self.paramLayouts[row_ind].addWidget(self.addCategoryBtn)
+        
+        self.paramLayouts[row_ind].addItem(self.spacer())
+
+    def onAddCategory(self, event):
+        clicked_button = self.sender()
+        cat_row_ind = clicked_button.row_ind
+
+        self.designData[cat_row_ind]['categories'].append("")
+        self.updateParamWidgets()
+
+    def onAddRow(self, event):
+        self.designData.append(self.init_param_dict.copy())
+        self.updateParamWidgets()
+
+    def onRowDelete(self, event):
+        clicked_button = self.sender()
+        for row in range(len(self.designData)):
+            widget = self.paramLayout.itemAtPosition(row, 0).widget()
+            if widget == clicked_button:
+                del_row_ind = row
+                
+        self.designData.pop(del_row_ind)
+        if self.designData == []:
+            self.designData = [self.init_param_dict.copy()]
+        self.updateParamWidgets()
+    
+    def addConfirmWidgets(self):
+        self.confirmLayout = QHBoxLayout()
+        self.confirmBtn = QPushButton(get_translation(babelFish, self.lankey, 'widgets', 'Generate Batch'))
+        self.confirmBtn.clicked.connect(self.onConfirm)
+        self.confirmLayout.addWidget(self.confirmBtn)
+        
+        self.cancelBtn = QPushButton(get_translation(babelFish, self.lankey, 'widgets', 'Cancel'))
+        self.cancelBtn.clicked.connect(self.onCancel)
+        self.confirmLayout.addWidget(self.cancelBtn)
+    
+        self.confirmLayout.addItem(self.spacer("hor-exp"))
+    
+        self.layout.addLayout(self.confirmLayout)
+
+    def onConfirm(self, event):
+        if self.file_path == "":
+            QMessageBox.warning(self, get_translation(babelFish, self.lankey, 'widgets', 'No File Selected'),
+                                get_translation(babelFish, self.lankey, 'widgets', 'Please select a root UWL file to generate experiments.'))
+            return
+        
+        self.confirmed = True
+        parent_directory = QFileDialog.getExistingDirectory(self, get_translation(babelFish, self.lankey, 'widgets', 'Select Directory'))
+        if parent_directory:
+            self.createDateTimeDir(parent_directory)
+            self.generateExperiments()
+            self.saveExperiments()
+            self.closeEvent(event)
+
+    def onCancel(self, event):
+        self.closeEvent(event)
+    
+    def closeEvent(self, event):
+        """Emit blank data if not confirmed and close window."""
+        if not self.confirmed:
+            self.windowSignal.emit([])
+        else:
+            self.windowSignal.emit(self.designData)
+        self.close()
+
+    def clear_grid_layout(self):
+        # Loop through all the items in the grid layout and remove them
+        while self.paramLayout.count():
+            item = self.paramLayout.takeAt(0)  # Remove the first item from the layout
+
+            # If the item is a widget, delete it
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+            # If the item is a layout, clear it recursively
+            layout = item.layout()
+            if layout is not None:
+                self.clear_layout(layout)  # Call recursive function to clear nested layout
+
+            # Finally, remove the layout item itself
+            self.paramLayout.removeItem(item)
+
+    def clear_layout(self, layout):
+        """Recursively clear all widgets and nested layouts from a layout."""
+        while layout.count():
+            item = layout.takeAt(0)
+
+            # If the item is a widget, delete it
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+            # If the item is another layout, clear it recursively
+            nested_layout = item.layout()
+            if nested_layout is not None:
+                self.clear_layout(nested_layout)
+
+            # Remove the item
+            layout.removeItem(item)
+
+    def createDateTimeDir(self, parent_dir):
+        dt_str = datetime.now().strftime("Generated_%Y-%m-%d_%H-%M-%S")
+        self.dirpath = os.path.join(parent_dir, dt_str)
+        os.makedirs(self.dirpath)
+
+    def saveExperiments(self):
+        root_UWL = loadjson(self.file_path)
+        for ii, experiment in enumerate(self.experimentSet):
+            temp_UWL = copy.deepcopy(root_UWL)
+            for jj, experiment_val in enumerate(experiment):
+                self.temp_units = self.designData[jj]["units"]
+                if self.temp_units != "":
+                    self.temp_units = " " + self.temp_units
+                keypath = self.keyPathLists[self.paramList.index(self.designData[jj]["parameter"])]
+                self.assignValuetoWorkflowThroughSection(temp_UWL, keypath, experiment_val)
+            filename = self.rootNameWidget.text().replace("#", str(ii+1).zfill(3))
+            filename += ".uwl"
+            filepath = os.path.join(self.dirpath, filename)
+            savejson(temp_UWL, filepath)
+
+    def assignValuetoWorkflowThroughSection(self, section, keypath, value):
+        if len(keypath) > 2:
+            self.assignValuetoWorkflowThroughSection(section['Objects'][keypath[0]], keypath[1:], value)
+        else:
+            section['Objects'][keypath[0]]['Values'][keypath[1]] = str(value) + self.temp_units
+
+    def generateExperiments(self):
+        self.clearEmptyCategories()
+        if self.designType == "Random":
+            self.generateExperiments_Random()
+        elif self.designType == "Grid":
+            self.generateExperiments_Grid()
+        elif self.designType == "Latin Hypercube":
+            self.generateExperiments_LatinHypercube()
+        elif self.designType == "Minimax":
+            self.generateExperiments_Minimax()
+
+    def clearEmptyCategories(self):
+        for row_ind, param in enumerate(self.designData):
+            if param["dtype"] == "Categorical":
+                cat_list = self.designData[row_ind]["categories"]
+                self.designData[row_ind]["categories"] = [value for value in cat_list if value != ""]
+
+    def generateExperiments_Random(self):
+        self.experimentSet = []
+        for exp_num in range(self.numExp):
+            experiment = []
+            for param in self.designData:
+                if param["dtype"] == "Numerical-Continuous":
+                    min_bnd = float(param["min_bnd"])
+                    max_bnd = float(param["max_bnd"])
+                    if param["scale"] == "Linear":
+                        param_val = random.uniform(min_bnd, max_bnd)
+                    elif param["scale"] == "Log":
+                        log_min_bnd = math.log10(min_bnd)
+                        log_max_bnd = math.log10(max_bnd)
+                        log_param_val = random.uniform(log_min_bnd, log_max_bnd)
+                        param_val = 10 ** log_param_val
+
+                elif param["dtype"] == "Numerical-Integer":
+                    min_bnd = float(param["min_bnd"])
+                    max_bnd = float(param["max_bnd"])
+                    if param["scale"] == "Linear":
+                        param_val = random.randint(min_bnd, max_bnd)
+                    elif param["scale"] == "Log":
+                        log_min_bnd = math.log10(min_bnd)
+                        log_max_bnd = math.log10(max_bnd)
+                        log_param_val = random.uniform(log_min_bnd, log_max_bnd)
+                        param_val = round(10 ** log_param_val)
+                
+                elif param["dtype"] == "Numerical-Discrete":
+                    min_bnd = float(param["min_bnd"])
+                    max_bnd = float(param["max_bnd"])
+                    levels = int(param["disc_levels"])
+                    if param["scale"] == "Linear":
+                        disc_list = np.linspace(min_bnd, max_bnd, levels).tolist()
+                    elif param["scale"] == "Log":
+                        log_min_bnd = math.log10(min_bnd)
+                        log_max_bnd = math.log10(max_bnd)
+                        disc_list = np.logspace(log_min_bnd, log_max_bnd, levels).tolist()
+                    param_val = random.choice(disc_list)
+
+                elif param["dtype"] == "Categorical":
+                    param_val = random.choice(param["categories"])
+
+                experiment.append(param_val)
+
+            self.experimentSet.append(experiment)
+
+    def generateExperiments_Grid(self):
+        param_lists = []
+        for param in self.designData:
+            if param["dtype"] == "Numerical-Continuous":
+                min_bnd = float(param["min_bnd"])
+                max_bnd = float(param["max_bnd"])
+                levels = int(param["levels"])
+                if param["scale"] == "Linear":
+                    param_list = np.linspace(min_bnd, max_bnd, levels).tolist()
+                elif param["scale"] == "Log":
+                    log_min_bnd = math.log10(min_bnd)
+                    log_max_bnd = math.log10(max_bnd)
+                    param_list = np.logspace(log_min_bnd, log_max_bnd, levels).tolist()
+
+            elif param["dtype"] == "Numerical-Integer":
+                min_bnd = float(param["min_bnd"])
+                max_bnd = float(param["max_bnd"])
+                levels = int(param["levels"])
+                if param["scale"] == "Linear":
+                    param_list = np.linspace(min_bnd, max_bnd, levels, dtype=int).tolist()
+                elif param["scale"] == "Log":
+                    log_min_bnd = math.log10(min_bnd)
+                    log_max_bnd = math.log10(max_bnd)
+                    param_list = np.logspace(log_min_bnd, log_max_bnd, levels, dtype=int).tolist()
+            
+            elif param["dtype"] == "Numerical-Discrete":
+                min_bnd = float(param["min_bnd"])
+                max_bnd = float(param["max_bnd"])
+                levels = int(param["disc_levels"])
+                if param["scale"] == "Linear":
+                    param_list = np.linspace(min_bnd, max_bnd, levels).tolist()
+                elif param["scale"] == "Log":
+                    log_min_bnd = math.log10(min_bnd)
+                    log_max_bnd = math.log10(max_bnd)
+                    param_list = np.logspace(log_min_bnd, log_max_bnd, levels).tolist()
+
+            elif param["dtype"] == "Categorical":
+                param_list = param["categories"]
+
+            param_lists.append(param_list)
+
+        self.experimentSet = [list(item) for item in itertools.product(*param_lists)]  
+        random.shuffle(self.experimentSet)
+
+    def generateExperiments_LatinHypercube(self):
+        sampler = qmc.LatinHypercube(d=1)
+        param_lists = []
+        for param in self.designData:
+            if param["dtype"] == "Numerical-Continuous":
+                min_bnd = float(param["min_bnd"])
+                max_bnd = float(param["max_bnd"])
+                if param["scale"] == "Linear":
+                    samples = sampler.random(self.numExp)
+                    param_list = qmc.scale(samples, min_bnd, max_bnd)
+                    param_list = [sample[0] for sample in param_list]
+                    
+                elif param["scale"] == "Log":
+                    log_min_bnd = math.log10(min_bnd)
+                    log_max_bnd = math.log10(max_bnd)
+                    samples = sampler.random(self.numExp)
+                    param_list = 10 ** qmc.scale(samples, log_min_bnd, log_max_bnd)
+                    param_list = [sample[0] for sample in param_list]
+
+            elif param["dtype"] == "Numerical-Integer":
+                min_bnd = float(param["min_bnd"])
+                max_bnd = float(param["max_bnd"])
+                if param["scale"] == "Linear":
+                    samples = sampler.random(self.numExp)
+                    param_list = qmc.scale(samples, min_bnd, max_bnd)
+                    param_list = [int(sample[0]) for sample in param_list]
+
+                elif param["scale"] == "Log":
+                    log_min_bnd = math.log10(min_bnd)
+                    log_max_bnd = math.log10(max_bnd)
+                    samples = sampler.random(self.numExp)
+                    samples = [sample[0] for sample in samples]
+                    param_list = 10 ** qmc.scale(samples, log_min_bnd, log_max_bnd)
+                    param_list = [int(sample[0]) for sample in param_list]
+            
+            elif param["dtype"] == "Numerical-Discrete":
+                min_bnd = float(param["min_bnd"])
+                max_bnd = float(param["max_bnd"])
+                levels = int(param["disc_levels"])
+                if param["scale"] == "Linear":
+                    possible_values = np.linspace(min_bnd, max_bnd, levels).tolist()
+                elif param["scale"] == "Log":
+                    log_min_bnd = math.log10(min_bnd)
+                    log_max_bnd = math.log10(max_bnd)
+                    possible_values = np.logspace(log_min_bnd, log_max_bnd, levels).tolist()
+
+                loop_values = possible_values.copy()
+                param_list = []
+                for ii in range(self.numExp):
+                    if len(loop_values) == 0:
+                        loop_values = possible_values.copy()
+                    value = random.choice(loop_values)
+                    loop_values.remove(value)
+                    param_list.append(value)
+
+
+            elif param["dtype"] == "Categorical":
+                possible_values = param["categories"]
+                loop_values = possible_values.copy()
+                param_list = []
+                for ii in range(self.numExp):
+                    if len(loop_values) == 0:
+                        loop_values = possible_values.copy()
+                    value = random.choice(loop_values)
+                    loop_values.remove(value)
+                    param_list.append(value)
+
+            print(param, param_list)
+            param_lists.append(param_list)
+        self.experimentSet = np.array(param_lists).transpose()
+        print(self.experimentSet)
+
+    def generateExperiments_Minimax(self):
+        sampler = qmc.LatinHypercube(d=1)
+        nondim_param_lists = []
+        num_param_inds = []
+        for param_ind, param in enumerate(self.designData):
+            if param["dtype"] != "Categorical":
+                num_param_inds.append(param_ind)
+            
+            if param["dtype"] in ["Numerical-Continuous", "Numerical-Integer"]:
+                samples = sampler.random(self.numExp)
+                nondim_param_list = [sample[0] for sample in samples]
+                
+            elif param["dtype"] == "Numerical-Discrete":
+                levels = int(param["disc_levels"])
+                possible_values = np.linspace(0, 1, levels).tolist()
+                loop_values = possible_values.copy()
+                nondim_param_list = []
+                for ii in range(self.numExp):
+                    if len(loop_values) == 0:
+                        loop_values = possible_values.copy()
+                    value = random.choice(loop_values)
+                    loop_values.remove(value)
+                    nondim_param_list.append(value)
+
+            nondim_param_lists.append(nondim_param_list)
+            nondim_experiments = np.array(nondim_param_lists).transpose()
+
+        nondim_experiments = self.optimize_minimax_lhs(nondim_experiments, self.numExp, len(self.designData))
+        nondim_experiments = np.array(nondim_experiments)
+        
+        param_lists = []
+        for param_ind, param in enumerate(self.designData):
+            if param["dtype"] == "Numerical-Continuous":
+                min_bnd = float(param["min_bnd"])
+                max_bnd = float(param["max_bnd"])
+                nondim_ind = num_param_inds.index(param_ind)
+                samples = [[sample for sample in nondim_experiments[:, nondim_ind]]]
+
+                if param["scale"] == "Linear":
+                    param_list = qmc.scale(samples, min_bnd, max_bnd)[0]
+                    
+                elif param["scale"] == "Log":
+                    log_min_bnd = math.log10(min_bnd)
+                    log_max_bnd = math.log10(max_bnd)
+                    param_list = 10 ** qmc.scale(samples, log_min_bnd, log_max_bnd)[0]
+
+            elif param["dtype"] == "Numerical-Integer":
+                min_bnd = float(param["min_bnd"])
+                max_bnd = float(param["max_bnd"])
+                nondim_ind = num_param_inds.index(param_ind)
+                samples = [[sample for sample in nondim_experiments[:, nondim_ind]]]
+                if param["scale"] == "Linear":
+                    param_list = qmc.scale(samples, min_bnd, max_bnd)[0]
+                    param_list = [int(sample) for sample in param_list]
+
+                elif param["scale"] == "Log":
+                    log_min_bnd = math.log10(min_bnd)
+                    log_max_bnd = math.log10(max_bnd)
+                    param_list = 10 ** qmc.scale(samples, log_min_bnd, log_max_bnd)[0]
+                    param_list = [max([int(sample), 1]) for sample in param_list]
+            
+            elif param["dtype"] == "Numerical-Discrete":
+                levels = int(param["disc_levels"])
+                min_bnd = float(param["min_bnd"])
+                max_bnd = float(param["max_bnd"])
+                nondim_ind = num_param_inds.index(param_ind)
+                samples = [[sample for sample in nondim_experiments[:, nondim_ind]]]
+                levels = int(param["disc_levels"])
+                if param["scale"] == "Linear":
+                    possible_values = np.linspace(min_bnd, max_bnd, levels).tolist()
+                    samples = qmc.scale(samples, min_bnd, max_bnd)[0]
+                    param_list = [possible_values[np.abs(possible_values - sample).argmin()] for sample in samples]
+
+                elif param["scale"] == "Log":
+                    log_min_bnd = math.log10(min_bnd)
+                    log_max_bnd = math.log10(max_bnd)
+                    possible_values = np.linspace(log_min_bnd, log_max_bnd, levels).tolist()
+                    samples = qmc.scale(samples, log_min_bnd, log_max_bnd)[0]
+                    param_list = [10**possible_values[np.abs(possible_values - sample).argmin()] for sample in samples]
+
+
+            elif param["dtype"] == "Categorical":
+                possible_values = param["categories"]
+                loop_values = possible_values.copy()
+                param_list = []
+                for ii in range(self.numExp):
+                    if len(loop_values) == 0:
+                        loop_values = possible_values.copy()
+                    value = random.choice(loop_values)
+                    loop_values.remove(value)
+                    param_list.append(value)
+
+            param_lists.append(param_list)
+
+        self.experimentSet = np.array(param_lists).transpose()
+
+    def calculate_min_pairwise_distance(self, samples):
+        """
+        Calculate the minimum pairwise distance in the sample set.
+        """
+        dist_matrix = distance_matrix(samples, samples)
+        np.fill_diagonal(dist_matrix, np.inf)  # Ignore self-distance
+        min_distance = dist_matrix.min()
+        return min_distance
+
+    def objective_function(self, flat_samples, num_samples, num_dimensions):
+        """
+        Objective function to maximize the minimum pairwise distance.
+        We return the negative of this value because SciPy minimizes functions.
+        """
+        samples = flat_samples.reshape((num_samples, num_dimensions))
+        return -self.calculate_min_pairwise_distance(samples)
+
+    def optimize_minimax_lhs(self, nondim_experiments, num_samples, num_dimensions, num_iterations=10000):
+        """
+        Generate an LHS and optimize it to approximate a Minimax design.
+        """
+        # Generate initial LHS sample
+        flat_samples = nondim_experiments.flatten()
+
+        opt_bnds = [(0,1) for ii in range(num_dimensions*num_samples)]
+
+        # Run optimization
+        result = minimize(
+            self.objective_function,
+            flat_samples,
+            args=(num_samples, num_dimensions),
+            method='L-BFGS-B',
+            options={'maxiter': num_iterations},
+            bounds=opt_bnds
+        )
+
+        # Reshape optimized sample back to original dimensions
+        optimized_samples = result.x.reshape((num_samples, num_dimensions))
+        return optimized_samples
+
+
+class BuildTableMapWindow(QWidget):
+    windowSignal = Signal(object)
+    def __init__(self, lankey='en'):
+        super().__init__()
+        
+        self.lankey = lankey
+        self.resize(400, 400)
+
+        self.layout = QVBoxLayout()
+        self.setWindowModality(Qt.ApplicationModal)
+        self.file_path = ""
+        self.fname = ""
+        self.confirmed = False
+        self.paramList = []
+        
+        self.addRootFileWidgets()
+        self.addParamWidgets()
+        self.addConfirmWidgets()
+
+        self.layout.addItem(self.spacer("min"))
+        self.setLayout(self.layout)
+
+
+    def spacer(self, method="min"):
+        if method == "min":
+            spacer = QSpacerItem(20, 0, QSizePolicy.Minimum, QSizePolicy.Minimum)
+        elif method == "hor-exp":
+            spacer = QSpacerItem(0, 0, QSizePolicy.Expanding, QSizePolicy.Minimum)
+        return spacer
+
+    def addRootFileWidgets(self):
+        self.layoutRootFile = QHBoxLayout()
+        self.layoutRootFile.addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Root UWL:')))
+
+        self.filepathIndicatorWidget = QLabel(get_translation(babelFish, self.lankey, 'widgets', '** Select File to View Parameters **'))
+        self.layoutRootFile.addWidget(self.filepathIndicatorWidget)
+        
+        self.browseRootFileWidget = QPushButton(get_translation(babelFish, self.lankey, 'widgets', 'Browse'))
+        self.browseRootFileWidget.clicked.connect(self.open_file_browser)
+        self.layoutRootFile.addWidget(self.browseRootFileWidget)
+        
+        self.layoutRootFile.addItem(self.spacer("hor-exp"))
+        
+        self.layout.addLayout(self.layoutRootFile)
+    
+    def open_file_browser(self):
+        # Open a file dialog and get the selected file path
+        filter_string = get_translation(babelFish, self.lankey, 'widgets', 'UWL Entry (*.uwl *.json);;UWL Template (*.uwlt)')
+        temp_file_path, _ = QFileDialog.getOpenFileName(self, get_translation(babelFish, self.lankey, 'widgets', 'Open File'), "", filter_string)
+        
+        if temp_file_path != "" and temp_file_path != self.file_path:
+            self.file_path = temp_file_path
+            self.filepathIndicatorWidget.setText(self.file_path)
+            self.fname = os.path.splitext(os.path.basename(self.file_path))[0]
+            self.updateParameterWidget()
+    
+    def addParamWidgets(self):
+        self.paramLayout = QGridLayout()
+        self.scrollArea = QScrollArea()
+        self.scrollArea.setWidgetResizable(True)
+        self.paramWidget = QWidget()
+        self.paramWidget.setLayout(self.paramLayout)
+        self.scrollArea.setWidget(self.paramWidget)
+        self.layout.addWidget(self.scrollArea)
+
+    def updateParameterWidget(self):
+        """Update the parameter list and widgets based on the selected file."""
+        self.getParameterList()
+        
+        if hasattr(self, 'paramLayout'):
+            self.clear_grid_layout()
+        else:
+            self.addParamWidgets()
+        
+        self.addHeaderWidgets()
+        self.addCheckBoxWidgets()
+
+    def clear_grid_layout(self):
+        # Loop through all the items in the grid layout and remove them
+        while self.paramLayout.count():
+            item = self.paramLayout.takeAt(0)  # Remove the first item from the layout
+
+            # If the item is a widget, delete it
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+            # If the item is a layout, clear it recursively
+            layout = item.layout()
+            if layout is not None:
+                self.clear_layout(layout)  # Call recursive function to clear nested layout
+
+            # Finally, remove the layout item itself
+            self.paramLayout.removeItem(item)
+
+    def addHeaderWidgets(self):
+        self.paramLayout.addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Parameter')), 0, 0)
+        self.paramLayout.addWidget(QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Notes (optional)')), 0, 1)
+
+    def addCheckBoxWidgets(self):
+        self.checkboxWidgets = []
+        self.notesWidgets = []
+        for row, param in enumerate(self.paramList):
+            self.checkboxWidgets.append(QCheckBox(param))
+            self.checkboxWidgets[row].setChecked(False)
+            self.paramLayout.addWidget(self.checkboxWidgets[row], row+1, 0)
+
+            self.notesWidgets.append(QLineEdit())
+            self.paramLayout.addWidget(self.notesWidgets[row], row+1, 1)
+
+
+    def getParameterList(self):
+        workflow = loadjson(self.file_path)
+        self.uwl = copy.deepcopy(workflow)
+        
+        paramListObj = TabViewController()
+        paramListObj.entrynames, paramListObj.tableNames = [], []
+        paramListObj.addSectionTableNames(workflow, keyPath=[])
+        
+        self.keyPathLists = paramListObj.keyPathLists
+        self.paramList = paramListObj.tableNames
+
+    def addConfirmWidgets(self):
+        self.confirmLayout = QHBoxLayout()
+        self.confirmBtn = QPushButton(get_translation(babelFish, self.lankey, 'widgets', 'Generate Table'))
+        self.confirmBtn.clicked.connect(self.onConfirm)
+        self.confirmLayout.addWidget(self.confirmBtn)
+        
+        self.cancelBtn = QPushButton(get_translation(babelFish, self.lankey, 'widgets', 'Cancel'))
+        self.cancelBtn.clicked.connect(self.onCancel)
+        self.confirmLayout.addWidget(self.cancelBtn)
+
+        self.helpBtn = QPushButton(get_translation(babelFish, self.lankey, 'widgets', '?'))
+        self.helpBtn.clicked.connect(self.onHelp)
+        self.confirmLayout.addWidget(self.helpBtn)
+
+        self.confirmLayout.addItem(self.spacer("hor-exp"))
+    
+        self.layout.addLayout(self.confirmLayout)
+
+    def onHelp(self):
+        help_text = (
+            get_translation(babelFish, self.lankey, 'widgets', "Use the file picker to select a base UWL, then select the parameters you want to include in the table by checking the boxes next to them. You can also add notes for each parameter if desired. Notes will be displayed in the generated Excel file."),
+            get_translation(babelFish, self.lankey, 'widgets', "Click 'Generate Table' to create a formatted table with the selected parameters and notes. The table will be saved as an Excel file, which can be modified as a set of experiments and imported back into the UWLi.")
+            )
+        QMessageBox.information(self, get_translation(babelFish, self.lankey, 'widgets', 'Help'), "\n\n".join(help_text))
+
+    def onConfirm(self, event):
+        if self.file_path == "":
+            QMessageBox.warning(self, get_translation(babelFish, self.lankey, 'widgets', 'No file selected'), get_translation(babelFish, self.lankey, 'widgets', 'Please select a root UWL file.'))
+            return
+        
+        self.confirmed = True
+        file_path, _ = QFileDialog.getSaveFileName(self, get_translation(babelFish, self.lankey, 'widgets', 'Save Formatted Table'), "", get_translation(babelFish, self.lankey, 'widgets', 'Excel Files (*.xlsx);;All Files (*)'))
+        if file_path:
+            if not file_path.lower().endswith('.xlsx'):
+                file_path += '.xlsx'
+
+            self.splitRootUWL()
+            self.getExportTableData()
+            # Pad the lists so they are all the same length
+            max_len = max(len(self.hidden_uwl), len(self.hidden_keymap), len(self.param_column))
+            def pad_list(lst, fill=""):
+                return lst + [fill] * (max_len - len(lst))
+            df = pd.DataFrame({
+                "hidden_rootuwl": pad_list(self.hidden_uwl),
+                "hidden_keymap": pad_list(self.hidden_keymap),
+                "Parameters": pad_list(self.param_column)
+            })
+            # Save the DataFrame to Excel, then hide the first two columns using openpyxl
+            df.to_excel(file_path, index=False)
+
+            # Hide the first two columns using openpyxl
+            try:
+                wb = load_workbook(file_path)
+                ws = wb.active
+                ws.column_dimensions['A'].hidden = True
+                ws.column_dimensions['B'].hidden = True
+                wb.save(file_path)
+            except Exception as e:
+                print("Warning: Could not hide columns in Excel file:", e)
+            self.closeEvent(event)
+
+    def splitRootUWL(self):
+        uwl_str = str(copy.deepcopy(self.uwl))
+        max_chunk_size = 20000
+        self.hidden_uwl = [uwl_str[i:i+max_chunk_size] for i in range(0, len(uwl_str), max_chunk_size)]
+
+    def getExportTableData(self):
+        self.hidden_keymap = []
+        self.param_column = []
+
+        for table_ind, param in enumerate(self.paramList):
+            if self.checkboxWidgets[table_ind].isChecked():
+                self.hidden_keymap.append(self.keyPathLists[table_ind])
+                if self.notesWidgets[table_ind].text() != "":
+                    param += " - " + self.notesWidgets[table_ind].text()
+                self.param_column.append(param)
+
+    def onCancel(self, event):
+        self.closeEvent(event)
+    
+    def closeEvent(self, event):
+        """Emit blank data if not confirmed and close window."""
+        if not self.confirmed:
+            self.windowSignal.emit([])
+        else:
+            self.windowSignal.emit([])
+        self.close()
+
+
+class TableMapImportWindow(QWidget):
+    windowSignal = Signal(object)
+    def __init__(self, lankey='en'):
+        super().__init__()
+        
+        self.lankey = lankey
+        self.resize(400, 400)
+
+        self.layout = QVBoxLayout()
+        self.setWindowModality(Qt.ApplicationModal)
+
+        self.file_path = ""
+        self.fname = ""
+        self.confirmed = False
+        self.openImportFolder = False
+        self.paramList = []
+
+        self.setLayout(self.layout)
+        self.addFilePickerWidget()
+        self.addTableWidget()
+        self.addConfirmWidgets()
+
+        self.layout.addSpacerItem(self.spacer("min"))
+
+    def addFilePickerWidget(self):
+        self.filePickerLayout = QHBoxLayout()
+        self.filePickerBtn = QPushButton(get_translation(babelFish, self.lankey, 'widgets', 'Browse Table File'))
+        self.filePickerBtn.clicked.connect(self.open_file_picker)
+        self.filePickerLayout.addWidget(self.filePickerBtn)
+
+
+        self.selectedFileLabel = QLabel(get_translation(babelFish, self.lankey, 'widgets', 'Select a table file to view.'))
+        self.filePickerLayout.addWidget(self.selectedFileLabel)
+
+        self.filePickerLayout.addSpacerItem(self.spacer("hor-exp"))
+
+        self.layout.addLayout(self.filePickerLayout)
+
+    def open_file_picker(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, get_translation(babelFish, self.lankey, 'widgets', 'Select Excel File'), "", get_translation(babelFish, self.lankey, 'widgets', 'Excel Files (*.xlsx)'))
+        if file_path:
+            self.file_path = file_path
+            self.fname = os.path.splitext(os.path.basename(self.file_path))[0]
+            
+            try:
+                self.df = pd.read_excel(self.file_path)
+                self.updateTablefromFile()
+                self.selectedFileLabel.setText(self.file_path)
+            except:
+                QMessageBox.warning(self, get_translation(babelFish, self.lankey, 'widgets', 'Invalid Table Format'), get_translation(babelFish, self.lankey, 'widgets', 'The selected Excel file could not be read. Please ensure the table is formatted correctly and try again.'))
+
+    def addTableWidget(self):
+        self.tableWidget = QTableWidget()
+        header = self.tableWidget.horizontalHeader()
+        header.setSectionsClickable(True)
+        header.setSectionsMovable(True)
+        header.sectionDoubleClicked.connect(self.editHeaderLabel)
+
+        self.scrollArea = QScrollArea()
+        self.scrollArea.setWidgetResizable(True)
+        self.scrollArea.setWidget(self.tableWidget)
+
+        self.layout.addWidget(self.scrollArea)
+
+    def editHeaderLabel(self, col):
+        if col == 0:
+            return
+        old_label = self.tableWidget.horizontalHeaderItem(col).text()
+        new_label, ok = QInputDialog.getText(self, get_translation(babelFish, self.lankey, 'widgets', 'Edit Column Label'), f"{get_translation(babelFish, self.lankey, 'widgets', 'Enter new label for column')} '{old_label}':", QLineEdit.Normal, old_label)
+        if ok and new_label and new_label != old_label:
+            self.tableWidget.setHorizontalHeaderItem(col, QTableWidgetItem(new_label))
+            # Update self.df column name as well
+            columns = list(self.param_df.columns)
+            columns[col] = new_label
+            self.param_df.columns = columns
+
+    def contextMenuEvent(self, event):
+        # Only trigger context menu if the event is on the header
+        pos = self.tableWidget.viewport().mapFrom(self, event.pos())
+        header = self.tableWidget.horizontalHeader()
+        logical_index = header.logicalIndexAt(pos)
+        
+        if logical_index <= 0:
+            return  # Do not allow deleting the first column
+
+        menu = QMenu(self)
+        delete_action = QAction(get_translation(babelFish, self.lankey, 'widgets', 'Delete Column'), self)
+        delete_action.triggered.connect(lambda: self.deleteColumn(logical_index))
+        menu.addAction(delete_action)
+        menu.exec_(header.mapToGlobal(pos))
+
+    def deleteColumn(self, col):
+        if col == 0:
+            return  # Do not allow deleting the first column
+        col_name = self.param_df.columns[col]
+        self.param_df = self.param_df.drop(columns=[col_name])
+        self.tableWidget.removeColumn(col)
+   
+        self.tableWidget.setHorizontalHeaderLabels([str(col) for col in self.param_df.columns])
+        for row_idx, row in enumerate(self.param_df.itertuples(index=False)):
+            for col_idx, value in enumerate(row):
+                if pd.isna(value):
+                    value = ""
+                item = QTableWidgetItem(str(value))
+                self.tableWidget.setItem(row_idx, col_idx, item)
+
+    def updateTablefromFile(self):
+        if hasattr(self, 'df'):
+            if "Parameters" not in self.df.columns:
+                QMessageBox.critical(self, get_translation(babelFish, self.lankey, 'widgets', 'Invalid Table Format'), get_translation(babelFish, self.lankey, 'widgets', 'The selected Excel file does not contain a \'Parameters\' column. Please ensure the table is formatted correctly and try again.'))
+                self.tableWidget.setRowCount(0)
+                self.tableWidget.setColumnCount(0)
+                return
+            
+            if "hidden_rootuwl" not in self.df.columns or "hidden_keymap" not in self.df.columns:
+                QMessageBox.critical(self, get_translation(babelFish, self.lankey, 'widgets', 'Invalid Table Format'), get_translation(babelFish, self.lankey, 'widgets', 'The selected Excel file does not contain the required hidden columns (\'hidden_rootuwl\', \'hidden_keymap\'). Please ensure the table was generated by the UWLi export tool and try again.'))
+                self.tableWidget.setRowCount(0)
+                self.tableWidget.setColumnCount(0)
+                return
+            
+            # Reconstruct the hidden_rootuwl string and parse it as a dictionary
+            hidden_uwl_chunks = self.df["hidden_rootuwl"].dropna().astype(str).tolist()
+            uwl_str = "".join(hidden_uwl_chunks)
+            try:
+                self.uwl = eval(uwl_str)
+            except Exception:
+                try:
+                    self.uwl = ast.literal_eval(uwl_str)
+                except Exception:
+                    self.uwl = {}
+
+            if self.uwl == {}:
+                QMessageBox.warning(self, get_translation(babelFish, self.lankey, 'widgets', 'Invalid UWL'), get_translation(babelFish, self.lankey, 'widgets', 'The root UWL could not be loaded from the table file. Please ensure the file was generated by the UWLi export tool and try again.'))
+                self.tableWidget.setRowCount(0)
+                self.tableWidget.setColumnCount(0)
+                return
+
+            self.param_df = self.df.drop(columns=[col for col in self.df.columns if col in ["hidden_rootuwl", "hidden_keymap"]])
+            
+            cols = list(self.param_df.columns)
+
+            if "Parameters" in cols:
+                cols.insert(0, cols.pop(cols.index("Parameters")))
+                self.param_df = self.param_df[cols]
+
+            self.tableWidget.setRowCount(len(self.param_df))
+            self.tableWidget.setColumnCount(len(self.param_df.columns))
+            self.tableWidget.setHorizontalHeaderLabels([str(col) for col in self.param_df.columns])
+
+            for row_idx, row in enumerate(self.param_df.itertuples(index=False)):
+                for col_idx, value in enumerate(row):
+                    if pd.isna(value):
+                        value = ""
+                    item = QTableWidgetItem(str(value))
+                    self.tableWidget.setItem(row_idx, col_idx, item)
+
+        else:
+            self.tableWidget.setRowCount(0)
+            self.tableWidget.setColumnCount(0)
+
+    def sanitize_filename(self, name):
+        # Remove invalid characters and strip whitespace
+        name = re.sub(r'[\\/*?:"<>|]', "_", str(name))
+        name = name.strip()
+        return name
+            
+    def addConfirmWidgets(self):
+        self.confirmLayout = QHBoxLayout()
+
+        self.importsaveBtn = QPushButton(get_translation(babelFish, self.lankey, 'widgets', 'Import and Save UWLs'))
+        self.importsaveBtn.clicked.connect(self.onImportSave)
+        self.confirmLayout.addWidget(self.importsaveBtn)
+
+        # self.importNoSaveBtn = QPushButton("Import UWLs without Saving")
+        # self.importNoSaveBtn.clicked.connect(self.onImportNoSave)
+        # self.confirmLayout.addWidget(self.importNoSaveBtn)
+        
+        self.cancelBtn = QPushButton(get_translation(babelFish, self.lankey, 'widgets', 'Cancel'))
+        self.cancelBtn.clicked.connect(self.onCancel)
+        self.confirmLayout.addWidget(self.cancelBtn)
+
+        self.helpBtn = QPushButton(get_translation(babelFish, self.lankey, 'widgets', '?'))
+        self.helpBtn.clicked.connect(self.onHelp)
+        self.confirmLayout.addWidget(self.helpBtn)
+
+        self.confirmLayout.addItem(self.spacer("hor-exp"))
+    
+        self.layout.addLayout(self.confirmLayout)
+
+    def buildUWLsfromTable(self):
+        self.uwl_list = []
+        for col_idx in range(1, self.tableWidget.columnCount()):
+            uwl_copy = copy.deepcopy(self.uwl)
+            for row_idx in range(self.tableWidget.rowCount()):
+                param_value = self.tableWidget.item(row_idx, col_idx)
+                if param_value is not None:
+                    value = param_value.text()
+                    try:
+                        keypath = self.df["hidden_keymap"].iloc[row_idx]
+                        if isinstance(keypath, str):
+                            keypath = ast.literal_eval(keypath)
+                        section = uwl_copy
+                        for k in keypath[:-1]:
+                            section = section["Objects"][str(k)]
+                        if section["Type"] == "Item" and section["Link"]:
+                            print(section["Link"], section)
+                            linkID = section["Link ID"]
+                            self.propagateLinkValues(uwl_copy, linkID, keypath[-1], value)
+                        else:
+                            section["Values"][keypath[-1]] = value
+                    except Exception as e:
+                        print(f"Error assigning value for row {row_idx}, col {col_idx}: {e}")
+            self.uwl_list.append(uwl_copy)
+        
+        self.uwl_names = [self.tableWidget.horizontalHeaderItem(col_idx).text() for col_idx in range(1, self.tableWidget.columnCount())]
+        name_counts = {}
+        unique_names = []
+        for name in self.uwl_names:
+            if name not in name_counts:
+                name_counts[name] = 1
+                unique_names.append(name)
+            else:
+                name_counts[name] += 1
+                unique_name = f"{name} ({name_counts[name]})"
+                unique_names.append(unique_name)
+        self.uwl_names = unique_names
+
+    def propagateLinkValues(self, uwl_copy, linkID, param_ind, value):
+        for key in uwl_copy["Objects"].keys():
+            if uwl_copy["Objects"][key]["Type"] == "Item":
+                section = uwl_copy["Objects"][key]
+                if section["Link"] and section["Link ID"] == linkID:
+                    section["Values"][param_ind] = value
+            elif uwl_copy["Objects"][key]["Type"] == "Section":
+                self.propagateLinkValues(uwl_copy["Objects"][key], linkID, param_ind, value)
+
+
+    def saveUWLsfromList(self):
+        self.uwl_filepaths = []
+        for uwl_ind, uwl_name in enumerate(self.uwl_names):
+            uwl_name = self.sanitize_filename(uwl_name)
+            uwl_filepath = os.path.join(self.dirpath, f"{uwl_name}.uwl")
+            savejson(self.uwl_list[uwl_ind], uwl_filepath)
+            self.uwl_filepaths.append(uwl_filepath)
+
+    def onImportSave(self, event):
+        if self.file_path == "":
+            QMessageBox.warning(self, get_translation(babelFish, self.lankey, 'widgets', 'No File Selected'),
+                                get_translation(babelFish, self.lankey, 'widgets', 'Please select a table file to import experiments.'))
+            return
+        
+        self.confirmed = True
+        parent_directory = QFileDialog.getExistingDirectory(self, get_translation(babelFish, self.lankey, 'widgets', 'Select Directory'))
+        if parent_directory:
+            self.buildUWLsfromTable()
+            self.createDateTimeDir(parent_directory)
+            self.saveUWLsfromList()
+            self.openImportFolder = True
+            self.closeEvent(event)
+
+    def createDateTimeDir(self, parent_dir):
+        dt_str = datetime.now().strftime("TableImport_%Y-%m-%d_%H-%M-%S")
+        self.dirpath = os.path.join(parent_dir, dt_str)
+        os.makedirs(self.dirpath)
+
+    def onImportNoSave(self):
+        pass
+
+    def onCancel(self, event):
+        self.closeEvent(event)
+    
+    def closeEvent(self, event):
+        """Emit blank data if not confirmed and close window."""
+        if not self.confirmed or not self.openImportFolder:
+            self.windowSignal.emit([])
+        elif self.openImportFolder:
+            self.windowSignal.emit(self.uwl_filepaths)
+        else:
+            self.windowSignal.emit([])
+        self.close()
+
+    def onHelp(self):
+        help_text = (
+            get_translation(babelFish, self.lankey, 'widgets', "This window is used to import a batch of UWLs that are formatted in excel. Use the Build Table Map tool to create an excel file that can be manually edited to adjust parameter values. The file contains two hidden columns containing the root UWL and a map for each parameter to that root UWL. Files that were not originally created using the build tool will most likely fail to import here."),
+            get_translation(babelFish, self.lankey, 'widgets', "'Import and Save UWLs' will prompt you for a directory path and save your imported UWLs in a time stamped folder with the column headers corresponding to the file names."),
+            )
+        QMessageBox.information(self, get_translation(babelFish, self.lankey, 'widgets', 'Help'), "\n\n".join(help_text))
+
+    def spacer(self, method="min"):
+        if method == "min":
+            spacer = QSpacerItem(20, 0, QSizePolicy.Minimum, QSizePolicy.Minimum)
+        elif method == "hor-exp":
+            spacer = QSpacerItem(0, 0, QSizePolicy.Expanding, QSizePolicy.Minimum)
+        elif method == "ver-exp":
+            spacer = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
+        return spacer
 
 class autocompleteLineEdit(QLineEdit):
     """Modified QLineEdit that emits a mouse release event."""
@@ -4691,8 +7047,17 @@ class autocompleteLineEdit(QLineEdit):
         self.clicked.emit(event)
 
 
+
+
+
 if __name__ == "__main__":
+    
     myappid = 'NREL.UWLI.0.0'  # arbitrary string
+    if os.name == 'posix':
+        pass
+    else:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    logo_path = os.path.dirname(os.path.abspath(__file__)) + "//Logo//Logo_v1f.png"
     if os.name == 'posix':
         pass
     else:
@@ -4700,9 +7065,9 @@ if __name__ == "__main__":
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
-    # app.setStyle("Breeze")
+    app.setWindowIcon(QIcon(logo_path))
     qdarktheme.setup_theme('auto')
     window = WindowClass()
-    window.setWindowIcon(QIcon('Logo//Logo_v1f.png'))
+    window.setWindowIcon(QIcon(logo_path))
     window.show()
     app.exec_()

@@ -1,4 +1,5 @@
 # Universal Workflow Language Interface
+## Version 1.1.0
 ![Logo](/Logo/Logo_readme_v1.png?raw=true)
 
 UWLi (Universal Workflow Language interface) is a user interface for building and modifying UWL files. UWL is a data format used to represent high fidelity scientific procedures in a generalized, field agnostic workflow format.
@@ -10,12 +11,9 @@ To get involved in development or implementation or to learn more contact Robert
 ![Logo](/Logo/Summary_readme_v1.png?raw=true)
 
 # Installation
-## Windows
-Clone this repository to your local machine. Navigate to "UWL.exe" and double click the file. A second window should appear followed by the interface.
-
-## Python (Required for Mac)
+## Python
 ### Conda Installation (optional)
-If you do not have acess to pip or python, then a good way to install both is through Anaconda.
+If you do not have access to pip or python, then a good way to install both is through Anaconda.
 1. Go to the website https://anaconda.org/ and follow the instructions to download and install Anaconda.
 2. Once installed, navigate to the Environments tab on the left side of the interface.
 3. Click "Create" and pick an environment name like "uwl_env", and make sure Python version 3.11.9 is selected. Click create and wait for Anaconda to finish creating your environment.
@@ -35,13 +33,22 @@ The following instructions will allow you to run UWLi using python.
 cd < file path >
 ```
 
-2. Then install the required packages using the command prompt. This step only needs to be done once. After the packages have been installed, then simply follow steps 1 and 3 to launch the software.
+2. Then install the required packages using the commanda prompt. This step only needs to be done once. After the packages have been installed, then simply activate your environment and follow steps 1 and 3 to launch the software.
 ```shell
 pip install -r requirements.txt
 ```
+Note: For developers, use requirements_dev.txt for language preprocessing changes.
 
 3. Finally, run the python command to launch the software.
 ```shell
+python main.py
+```
+
+### Launch Software after Installation
+Once the software has been installed, to launch UWLi in the future run the following commands:
+```shell
+conda activate uwl_env
+cd < file path >
 python main.py
 ```
 
@@ -54,4 +61,7 @@ pip install pyqt5
 
 2. If you get a dependency error, check if you are running Python version 3.11.9.
 
-UWLi should launch as a separate window and be available to use.
+UWLi should launch as a separate window and be available to use. If you have any problems contact repps@nrel.gov.
+
+# Tutorial
+A quickstart guide is provided in the Help >> Tutorial menu. Explore experiment batch handling features like table exports or design of experiments under the Batch menu.
